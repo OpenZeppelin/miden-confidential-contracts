@@ -1,0 +1,27 @@
+[package]
+name = "miden-confidential-contracts"
+version = "0.0.1"
+edition = "2024"
+default-run = "miden-confidential-contracts"
+
+[dependencies]
+miden-lib = { version = "0.11.5", default-features = false }
+miden-testing = { version = "0.11.5", default-features = false }
+miden-objects = { version = "0.11.5", default-features = false }
+miden-tx = { version = "0.11.5", default-features = false }
+miden-crypto = { version = "0.17.1", features = ["executable"] }
+miden-client = { version = "0.11.10", features = ["testing", "tonic", "sqlite"] }
+miden-assembly = "0.18.2"
+miden-processor = "0.17.0"
+rand = { version = "0.9" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+tokio = { version = "1.40", features = [
+    "rt-multi-thread",
+    "net",
+    "macros",
+    "fs",
+] }
+rand_chacha = "0.9.0"
+miden-client-tools = "0.2.4"
+anyhow = "1.0.100"
