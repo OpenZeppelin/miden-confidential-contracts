@@ -1,28 +1,19 @@
 use miden_client::{
-    Client as MidenClient, ClientError, DebugMode, Felt, ScriptBuilder, Word,
-    account::{Account, AccountBuilder, AccountId, AccountStorageMode, AccountType, StorageSlot},
-    auth::AuthSecretKey,
+    Client as MidenClient, ClientError, DebugMode,
+    account::{Account, AccountId},
     builder::ClientBuilder,
-    crypto::SecretKey,
     keystore::FilesystemKeyStore,
-    note::{
-        Note, NoteAssets, NoteExecutionHint, NoteExecutionMode, NoteInputs, NoteMetadata,
-        NoteRecipient, NoteRelevance, NoteScript, NoteTag, NoteType,
-    },
+    note::{Note, NoteRelevance},
     rpc::{Endpoint, TonicRpcClient},
     store::{InputNoteRecord, NoteFilter},
-    transaction::{OutputNote, TransactionRequestBuilder, TransactionScript},
 };
-use miden_lib::account::{
-    auth::{self, AuthRpoFalcon512},
-    wallets::BasicWallet,
-};
+
 use miden_lib::transaction::TransactionKernel;
 use miden_objects::{
     account::AccountComponent,
     assembly::{Assembler, DefaultSourceManager, Library, LibraryPath, Module, ModuleKind},
 };
-use rand::{RngCore, rngs::StdRng};
+
 use serde::de::value::Error;
 use std::{fs, path::Path, sync::Arc};
 
@@ -88,70 +79,6 @@ pub fn create_library(
     Ok(library)
 }
 
-// Creates public note
-pub async fn create_public_note(
-    client: &mut Client,
-    note_code: String,
-    creator_account: Account,
-    assets: NoteAssets,
-) -> Result<Note, Error> {
-    let assembler = TransactionKernel::assembler().with_debug_mode(true);
-    let rng = client.rng();
-    let serial_num = rng.inner_mut().draw_word();
-    let program = assembler.clone().assemble_program(note_code).unwrap();
-    let note_script = NoteScript::new(program);
-    let note_inputs = NoteInputs::new([].to_vec()).unwrap();
-    let recipient = NoteRecipient::new(serial_num, note_script, note_inputs.clone());
-    let tag = NoteTag::for_public_use_case(0, 0, NoteExecutionMode::Local).unwrap();
-    let metadata = NoteMetadata::new(
-        creator_account.id(),
-        NoteType::Public,
-        tag,
-        NoteExecutionHint::always(),
-        Felt::new(0),
-    )
-    .unwrap();
-
-    let note = Note::new(assets, metadata, recipient);
-
-    let note_req = TransactionRequestBuilder::new()
-        .own_output_notes(vec![OutputNote::Full(note.clone())])
-        .build()
-        .unwrap();
-    let tx_result = client
-        .new_transaction(creator_account.id(), note_req)
-        .await
-        .unwrap();
-
-    let _ = client.submit_transaction(tx_result).await;
-    client.sync_state().await.unwrap();
-
-    Ok(note)
-}
-
-// Creates basic account
-pub async fn create_basic_account(
-    client: &mut Client,
-    keystore: FilesystemKeyStore<StdRng>,
-) -> Result<(miden_client::account::Account, SecretKey), ClientError> {
-    let mut init_seed = [0_u8; 32];
-    client.rng().fill_bytes(&mut init_seed);
-
-    let key_pair = SecretKey::with_rng(client.rng());
-    let builder = AccountBuilder::new(init_seed)
-        .account_type(AccountType::RegularAccountUpdatableCode)
-        .storage_mode(AccountStorageMode::Public)
-        .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key().clone()))
-        .with_component(BasicWallet);
-    let (account, seed) = builder.build().unwrap();
-    client.add_account(&account, Some(seed), false).await?;
-    keystore
-        .add_key(&AuthSecretKey::RpoFalcon512(key_pair.clone()))
-        .unwrap();
-
-    Ok((account, key_pair))
-}
-
 pub async fn create_multisig_account_component() -> Result<AccountComponent, Error> {
     let assembler: Assembler = TransactionKernel::assembler().with_debug_mode(true);
     let multisig_code = fs::read_to_string(Path::new("./masm/auth/multisig.masm")).unwrap();
@@ -160,56 +87,6 @@ pub async fn create_multisig_account_component() -> Result<AccountComponent, Err
         .with_supports_all_types();
 
     Ok(multisig_component)
-}
-
-// Contract builder helper function
-pub async fn create_public_immutable_contract(
-    client: &mut Client,
-    account_code: &String,
-) -> Result<(Account, Word), ClientError> {
-    let assembler: Assembler = TransactionKernel::assembler().with_debug_mode(true);
-
-    let counter_component = AccountComponent::compile(
-        account_code.clone(),
-        assembler.clone(),
-        vec![StorageSlot::Value(Word::new([
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-        ]))],
-    )
-    .unwrap()
-    .with_supports_all_types();
-
-    let mut init_seed = [0_u8; 32];
-    client.rng().fill_bytes(&mut init_seed);
-    let (counter_contract, counter_seed) = AccountBuilder::new(init_seed)
-        .account_type(AccountType::RegularAccountImmutableCode)
-        .storage_mode(AccountStorageMode::Public)
-        .with_auth_component(auth::NoAuth)
-        .with_component(counter_component.clone())
-        .build()
-        .unwrap();
-
-    Ok((counter_contract, counter_seed))
-}
-
-pub fn create_tx_script(
-    script_code: String,
-    library: Option<Library>,
-) -> Result<TransactionScript, Error> {
-    if let Some(lib) = library {
-        return Ok(ScriptBuilder::new(true)
-            .with_dynamically_linked_library(&lib)
-            .unwrap()
-            .compile_tx_script(script_code)
-            .unwrap());
-    };
-
-    Ok(ScriptBuilder::new(true)
-        .compile_tx_script(script_code)
-        .unwrap())
 }
 
 // Waits for note

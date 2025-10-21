@@ -5,19 +5,19 @@ use.std::crypto::dsa::rpo_falcon512
 # -----------------------------------------------------------------------------
 # Storage layout (expected in the ACTIVE AUTH COMPONENT)
 # -----------------------------------------------------------------------------
-#   slot 3 : PSM selector (Word) ; [0,0,0,0] => OFF, [1,0,0,0] => ON
-#   slot 4 : PSM public key hash (Word)
+#   slot 4 : PSM selector (Word) ; [0,0,0,0] => OFF, [1,0,0,0] => ON
+#   slot 5 : PSM public key hash (Word)
 #
 # IMPORTANT:
 # - `exec.account::get_item` reads from the storage region of the *currently
 #   active authentication component*. If this file is called from `auth__`,
 #   these slots must exist in the auth component's storage (not in a separate,
 #   non-auth component). Otherwise reads will fail or return unrelated data.
-const.PSM_SELECTOR_SLOT=3
-const.PSM_PUBLIC_KEY_MAP_SLOT=4
+const.PSM_SELECTOR_SLOT=4
+const.PSM_PUBLIC_KEY_MAP_SLOT=5
 
-# The event emitted when a required (PSM) signature is not provided or invalid.
-const.UNAUTHORIZED_EVENT=131102
+# The event emitted when a signature is not found for a required signer.
+const.AUTH_UNAUTHORIZED_EVENT=event("miden::auth::unauthorized")
 
 #! Conditionally verify a "PSM" signature against a stored public key hash.
 #! The condition is controlled by the selector at PSM_SELECTOR_SLOT specified above.
@@ -30,6 +30,7 @@ const.UNAUTHORIZED_EVENT=131102
 #! Notes:
 #! MSG is TX_SUMMARY_COMMITMENT provided by `auth__`
 export.verify_psm_signature
+
     push.PSM_SELECTOR_SLOT
     # => [PSM_SELECTOR_SLOT, MSG]
 
@@ -63,7 +64,7 @@ export.verify_psm_signature
         # => [is_unauthorized, MSG]
         # If signatures are non-existent the tx will fail here.
         if.true
-            emit.UNAUTHORIZED_EVENT
+            emit.AUTH_UNAUTHORIZED_EVENT
             push.0 assert.err="invalid PSM signature"
         end
     else

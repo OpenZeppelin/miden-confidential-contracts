@@ -10,9 +10,8 @@ use miden_objects::testing::account_id::{
     ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET, ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE,
 };
 use miden_objects::transaction::OutputNote;
-use miden_objects::vm::AdviceMap;
-use miden_objects::{Felt, Hasher, Word};
-use miden_testing::{MockChainBuilder};
+use miden_objects::{Felt, Word};
+use miden_testing::MockChainBuilder;
 use miden_tx::TransactionExecutorError;
 use miden_tx::auth::{BasicAuthenticator, SigningInputs, TransactionAuthenticator};
 use rand::SeedableRng;
@@ -42,8 +41,9 @@ type MultisigPlusPsmTestSetup = (
 );
 
 pub struct AuthMultisig {
-    threshold: u32,
     approvers: Vec<PublicKey>,
+    default_threshold: u32,
+    proc_threshold_map: Vec<(Word, u32)>,
 }
 
 fn setup_keys_and_authenticators_with_psm(
@@ -68,7 +68,7 @@ fn setup_keys_and_authenticators_with_psm(
     for i in 0..threshold {
         let authenticator = BasicAuthenticator::<ChaCha20Rng>::new_with_rng(
             &[(
-                public_keys[i].into(),
+                public_keys[i].to_commitment(),
                 AuthSecretKey::RpoFalcon512(secret_keys[i].clone()),
             )],
             rng.clone(),
@@ -81,7 +81,7 @@ fn setup_keys_and_authenticators_with_psm(
     let psm_pub_key = psm_sec_key.public_key();
     let psm_authenticator = BasicAuthenticator::<ChaCha20Rng>::new_with_rng(
         &[(
-            psm_pub_key.into(),
+            psm_pub_key.to_commitment(),
             AuthSecretKey::RpoFalcon512(psm_sec_key.clone()),
         )],
         rng,
@@ -97,10 +97,10 @@ fn setup_keys_and_authenticators_with_psm(
     ))
 }
 
-fn create_multisig_with_psm_public_key(
+fn create_multisig_account_with_psm_public_key(
     multisig: AuthMultisig,
     asset_amount: u64,
-    psm_publick_key: PublicKey,
+    psm_public_key: PublicKey,
     psm_selector: u32,
 ) -> anyhow::Result<Account> {
     // Create a kernel based assembler for the account components
@@ -127,7 +127,7 @@ fn create_multisig_with_psm_public_key(
 
     // Slot 0: THRESHOLD_CONFIG_SLOT
     multisig_slots.push(StorageSlot::Value(Word::from([
-        multisig.threshold,
+        multisig.default_threshold,
         num_approvers,
         0,
         0,
@@ -138,19 +138,30 @@ fn create_multisig_with_psm_public_key(
         .approvers
         .iter()
         .enumerate()
-        .map(|(i, pub_key)| (Word::from([i as u32, 0, 0, 0]), (*pub_key).into()));
+        .map(|(i, pub_key)| (Word::from([i as u32, 0, 0, 0]), (*pub_key).to_commitment()));
+
     multisig_slots.push(StorageSlot::Map(
         StorageMap::with_entries(map_entries).unwrap(),
     ));
 
     // Slot 2: EXECUTED_TXS_SLOT
-    multisig_slots.push(StorageSlot::Map(StorageMap::default())); // slot 2: executed tx map
+    multisig_slots.push(StorageSlot::Map(StorageMap::default()));
 
-    // Slot 3: PSM_SELECTOR_SLOT
+    // Slot 3: PROC_THRESHOLD_MAP_SLOT
+    let proc_threshold_roots = StorageMap::with_entries(
+        multisig
+            .proc_threshold_map
+            .iter()
+            .map(|(proc_root, threshold)| (*proc_root, Word::from([*threshold, 0, 0, 0]))),
+    )
+    .unwrap();
+    multisig_slots.push(StorageSlot::Map(proc_threshold_roots));
+
+    // Slot 4: PSM_SELECTOR_SLOT
     multisig_slots.push(StorageSlot::Value(Word::from([psm_selector, 0, 0, 0])));
 
-    // Slot 4: PSM_PUBLIC_KEY_MAP_SLOT
-    let map_entries_psm_key = vec![(Word::from([0u32, 0, 0, 0]), psm_publick_key.into())];
+    // Slot 5: PSM_PUBLIC_KEY_MAP_SLOT
+    let map_entries_psm_key = vec![(Word::from([0u32, 0, 0, 0]), psm_public_key.to_commitment())];
     multisig_slots.push(StorageSlot::Map(
         StorageMap::with_entries(map_entries_psm_key).unwrap(),
     ));
@@ -186,7 +197,6 @@ fn create_multisig_with_psm_public_key(
 /// - 2 Approvers (multisig signers)
 /// - 1 Multisig Contract
 /// - 1 PSM Approver
-
 #[tokio::test]
 async fn test_multisig_2_of_2_with_note_creation_with_psm() -> anyhow::Result<()> {
     // Setup keys and authenticators with psm
@@ -201,17 +211,19 @@ async fn test_multisig_2_of_2_with_note_creation_with_psm() -> anyhow::Result<()
 
     // Create multisig account
     let multisig_starting_balance = 10u64;
-    
+
+    // Define multisig configuration
     let multisig = AuthMultisig {
-        threshold: 2,
         approvers: public_keys.clone(),
+        default_threshold: 2,
+        proc_threshold_map: vec![],
     };
 
     // Create multisig + psm account
-    let mut multisig_account = create_multisig_with_psm_public_key(
+    let mut multisig_account = create_multisig_account_with_psm_public_key(
         multisig,
         multisig_starting_balance,
-        psm_public_key,
+        psm_public_key.clone(),
         1,
     )?;
 
@@ -231,7 +243,7 @@ async fn test_multisig_2_of_2_with_note_creation_with_psm() -> anyhow::Result<()
     )?;
 
     // Create spawn note that will create the output note
-    let input_note = mock_chain_builder.add_spawn_note(multisig_account.id(), [&output_note])?;
+    let input_note = mock_chain_builder.add_spawn_note([&output_note])?;
 
     let mut mock_chain = mock_chain_builder.build().unwrap();
 
@@ -254,28 +266,24 @@ async fn test_multisig_2_of_2_with_note_creation_with_psm() -> anyhow::Result<()
     let tx_summary = SigningInputs::TransactionSummary(tx_summary);
 
     let sig_1 = authenticators[0]
-        .get_signature(public_keys[0].into(), &tx_summary)
+        .get_signature(public_keys[0].to_commitment().into(), &tx_summary)
         .await?;
     let sig_2 = authenticators[1]
-        .get_signature(public_keys[1].into(), &tx_summary)
+        .get_signature(public_keys[1].to_commitment().into(), &tx_summary)
         .await?;
 
     // Get signature from psm
     let psm_sig = psm_authenticator
-        .get_signature(psm_public_key.into(), &tx_summary)
+        .get_signature(psm_public_key.to_commitment().into(), &tx_summary)
         .await?;
-
-    // Populate advice map with signatures
-    let mut advice_map = AdviceMap::default();
-    advice_map.insert(Hasher::merge(&[public_keys[0].into(), msg]), sig_1);
-    advice_map.insert(Hasher::merge(&[public_keys[1].into(), msg]), sig_2);
-    advice_map.insert(Hasher::merge(&[psm_public_key.into(), msg]), psm_sig);
 
     // Execute transaction with signatures - should succeed
     let tx_context_execute = mock_chain
         .build_tx_context(multisig_account.id(), &[input_note.id()], &[])?
         .extend_expected_output_notes(vec![OutputNote::Full(output_note)])
-        .extend_advice_map(advice_map.iter().map(|(k, v)| (*k, v.to_vec())))
+        .add_signature(public_keys[0].clone().into(), msg, sig_1)
+        .add_signature(public_keys[1].clone().into(), msg, sig_2)
+        .add_signature(psm_public_key.clone().into(), msg, psm_sig)
         .auth_args(salt)
         .build()?
         .execute()
