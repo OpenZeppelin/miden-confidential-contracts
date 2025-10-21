@@ -403,9 +403,11 @@ export.auth_tx_rpo_falcon512_multisig.1
         push.0 assert.err="insufficient number of signatures"
     end
 
-    # ------ Writing executed transaction MSG to map ------
+    # ------ Verifying PSM Signature ------
+    # => [TX_SUMMARY_COMMITMENT]
     exec.psm::verify_psm_signature
 
-    exec.assert_new_tx
+    # ------ Writing executed transaction MSG to map ------
     # => [TX_SUMMARY_COMMITMENT]
+    exec.assert_new_tx
 end
