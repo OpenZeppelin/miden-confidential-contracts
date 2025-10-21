@@ -109,7 +109,7 @@ fn create_multisig_account_with_psm_public_key(
     // Create PSM component
     // Load PSM library
     let psm_code = fs::read_to_string(Path::new("./masm/auth/psm.masm")).unwrap();
-    let psm_lib: Library = create_library(psm_code.clone(), "external::psm").unwrap();
+    let psm_lib: Library = create_library(psm_code.clone(), "OpenZeppelin::psm").unwrap();
 
     // Create PSM component with the library
     let multisig_asm = base_asm.clone().with_dynamic_library(psm_lib).unwrap();

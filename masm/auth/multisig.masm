@@ -4,7 +4,7 @@
 
 use.miden::account
 use.miden::auth
-use.external::psm
+use.openzeppelin::psm
 
 # CONSTANTS
 # =================================================================================================
