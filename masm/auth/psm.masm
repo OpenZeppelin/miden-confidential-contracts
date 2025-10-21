@@ -42,7 +42,7 @@ export.verify_psm_signature
     push.1
     # => [1, psm_selector, MSG]
 
-    neq # is_equal
+    eq # is_equal
     # [is_equal, MSG]
 
     if.true
