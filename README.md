@@ -1,7 +1,12 @@
-# Miden Confidential Contracts
+# OpenZeppelin Contracts for Miden
 
-A minimal example for compiling, deploying, and testing MASM contracts & notes.
+**A library for secure smart contract development** written in Miden Assembly (MASM) and Rust for [Miden](https://miden.xyz)
 
+> ## ⚠️ WARNING! ⚠️
+>
+> This repo contains highly experimental code.
+> Expect rapid iteration.
+> **Use at your own risk.**
 
 ## Development
 
@@ -10,3 +15,9 @@ A minimal example for compiling, deploying, and testing MASM contracts & notes.
 ```bash
 cargo test
 ```
+
+
+
+## License
+
+OpenZeppelin Contracts is released under the [MIT License](LICENSE).
