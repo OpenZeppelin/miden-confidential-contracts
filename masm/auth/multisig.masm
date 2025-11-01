@@ -373,6 +373,7 @@ export.auth_tx_rpo_falcon512_multisig.1
 
     exec.account::get_initial_item
     # => [0, 0, num_of_approvers, default_threshold, TX_SUMMARY_COMMITMENT]
+    
 
     drop drop
     # => [num_of_approvers, default_threshold, TX_SUMMARY_COMMITMENT]
