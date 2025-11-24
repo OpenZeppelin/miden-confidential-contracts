@@ -2,22 +2,70 @@ use.miden::account
 use.miden::tx
 use.std::crypto::dsa::rpo_falcon512
 
-# -----------------------------------------------------------------------------
-# Storage layout (expected in the ACTIVE AUTH COMPONENT)
-# -----------------------------------------------------------------------------
-#   slot 4 : PSM selector (Word) ; [0,0,0,0] => OFF, [1,0,0,0] => ON
-#   slot 5 : PSM public key hash (Word)
+# IMPORTANT SECURITY NOTES
+# --------------------------------------------------------------------------------
+# - The selector in `PSM_SELECTOR_SLOT` controls whether the extra PSM signature
+#   is enforced:
+#     * PSM_ON  => exactly one valid PSM signature is required.
+#     * PSM_OFF => PSM signature is skipped for that call.
 #
-# IMPORTANT:
-# - `exec.account::get_item` reads from the storage region of the *currently
-#   active authentication component*. If this file is called from `auth__`,
-#   these slots must exist in the auth component's storage (not in a separate,
-#   non-auth component). Otherwise reads will fail or return unrelated data.
-const.PSM_SELECTOR_SLOT=4
-const.PSM_PUBLIC_KEY_MAP_SLOT=5
+# - `verify_psm_signature` *always* writes PSM_ON back to `PSM_SELECTOR_SLOT`
+#   at the end. This means:
+#     * After `update_psm_public_key` runs, the next transaction will see
+#       selector = OFF and will NOT require a PSM signature.
+#     * That same call to `verify_psm_signature` will set the selector to ON,
+#       so all subsequent transactions WILL require a valid PSM signature
+#       until the key is rotated again.
+#
+# - `update_psm_public_key`:
+#     * Temporarily disables the PSM selector (PSM_OFF),
+#     * Installs a new PSM public key in the map at `PSM_PUBLIC_KEY_MAP_SLOT`,
+#     * Does not itself perform any signature checks.
+#
+# Storage Layout
+# --------------------------------------------------------------------------------
+#
+# ┌─────────────────────┬───────────────┐
+# │     DESCRIPTION     │     SLOT      │
+# ├─────────────────────┼───────────────┤
+# │ PSM SELECTOR (word) │       0       │
+# │ PSM PUBLIC KEY MAP  │       1       │
+# └─────────────────────┴───────────────┘
+#
+# - PSM_SELECTOR_SLOT (0):
+#     * Stores a word that is compared against [1, 0, 0, 0] (PSM_ON).
+#     * Any value ≠ PSM_ON is treated as PSM_OFF.
+#
+# - PSM_PUBLIC_KEY_MAP_SLOT (1):
+#     * A map from a fixed key [0, 0, 0, 0] to the single PSM public key:
+#         [0, 0, 0, 0] => PSM_PUBLIC_KEY
+#     * PSM_PUBLIC_KEY is a RPO Falcon 512 public key represented as a word.
+#
+# Events
+# --------------------------------------------------------------------------------
+# - AUTH_UNAUTHORIZED_EVENT:
+#     * Emitted when the PSM signature is missing or invalid while the selector
+#       is ON.
+#     * Message emitted: "invalid PSM signature".
+#
+
+# Slot where the PSM selector flag is stored:
+# - PSM_ON  => PSM signature required
+# - PSM_OFF => PSM signature skipped
+const.PSM_SELECTOR_SLOT=0
+
+# Map entries:
+# Uses exactly one PSM public key at index [0, 0, 0, 0]
+# [0, 0, 0, 0] => PSM_PUBLIC_KEY
+const.PSM_PUBLIC_KEY_MAP_SLOT=1
+
+# Selector flag values
+const.PSM_ON  = [1, 0, 0, 0]
+const.PSM_OFF = [0, 0, 0, 0]
 
 # The event emitted when a signature is not found for a required signer.
 const.AUTH_UNAUTHORIZED_EVENT=event("miden::auth::unauthorized")
+
 
 #! Conditionally verify a "PSM" signature against a stored public key hash.
 #! The condition is controlled by the selector at PSM_SELECTOR_SLOT specified above.
@@ -30,10 +78,8 @@ const.AUTH_UNAUTHORIZED_EVENT=event("miden::auth::unauthorized")
 #! Notes:
 #! MSG is TX_SUMMARY_COMMITMENT provided by `auth__`
 export.verify_psm_signature
-
     push.PSM_SELECTOR_SLOT
     # => [PSM_SELECTOR_SLOT, MSG]
-
     exec.account::get_item 
     # => [0, 0, 0, psm_selector, MSG]
 
@@ -43,8 +89,12 @@ export.verify_psm_signature
     push.1
     # => [1, psm_selector, MSG]
 
+    # ------ Check the PSM selector is active ------
     eq # is_equal
     # [is_equal, MSG]
+    debug.stack
+
+    # ------ Conditionally verify the PSM signature ------
 
     if.true
         # => [MSG]
@@ -52,7 +102,7 @@ export.verify_psm_signature
         # [num_approvers, MSG]
 
         push.PSM_PUBLIC_KEY_MAP_SLOT
-        # => [PSM_PUBLIC_KEY_SLOT, num_approvers, MSG]
+        # => [PSM_PUBLIC_KEY_MAP_SLOT, num_approvers, MSG]
 
         exec.::miden::auth::rpo_falcon512::verify_signatures
         # => [num_verified_signatures, MSG]
@@ -76,4 +126,61 @@ export.verify_psm_signature
         drop
         # => [MSG]
     end
+    
+    # ------ Activate the PSM selector ------
+    push.PSM_ON
+    # => [PSM_ON, MSG]
+
+    push.PSM_SELECTOR_SLOT
+    # => [PSM_SELECTOR_SLOT, PSM_ON, MSG]
+
+    exec.account::set_item
+    # => [OLD_ROOT, MSG]
+
+    dropw
+    # => [MSG]
+end
+
+#! Update the PSM public key and temporarily disable PSM checks.
+#!
+#! Operand stack inputs: []
+#! Advice stack inputs:  [PUB_KEY]
+#!   - PUB_KEY is the new PSM RPO Falcon 512 public key
+#!
+#! Notes:
+#! - Sets selector to PSM_OFF in PSM_SELECTOR_SLOT.
+#! - Stores PUB_KEY into PSM_PUBLIC_KEY_MAP_SLOT: 
+#!      [0, 0, 0, 0] => PSM_PUBLIC_KEY
+#! - Next call to `verify_psm_signature` will turn selector back to PSM_ON.
+export.update_psm_public_key
+    # ------ Deactivate the PSM selector ------
+    push.PSM_OFF
+    # => [PSM_SELECTOR_SLOT]
+
+    push.PSM_SELECTOR_SLOT
+    # => [PSM_SELECTOR_SLOT, PSM_OFF]
+    
+    exec.account::set_item
+    # => [OLD_ROOT, pad(12)]
+    
+    dropw
+    # => []
+
+    # ------ Update the PSM public key ------
+
+    adv_loadw
+    # => [PUB_KEY]
+
+    push.0.0.0.0
+    # => [MAP_KEY, PUB_KEY]
+    # Note that MAP_KEY is [0, 0, 0, 0] for a single PSM_KEY
+
+    push.PSM_PUBLIC_KEY_MAP_SLOT
+    # => [index, MAP_KEY, PUB_KEY]
+
+    exec.account::set_map_item
+    # => [OLD_MAP_ROOT, OLD_MAP_VALUE, pad(8)]
+
+    dropw dropw
+    # => []
 end

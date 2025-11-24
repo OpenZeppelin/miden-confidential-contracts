@@ -406,7 +406,8 @@ export.auth_tx_rpo_falcon512_multisig.1
 
     # ------ Verifying PSM Signature ------
     # => [TX_SUMMARY_COMMITMENT]
-    exec.psm::verify_psm_signature
+    call.psm::verify_psm_signature
+    debug.stack
 
     # ------ Writing executed transaction MSG to map ------
     # => [TX_SUMMARY_COMMITMENT]
