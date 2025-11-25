@@ -1,4 +1,4 @@
-use miden_confidential_contracts::common::create_library;
+use miden_confidential_contracts::masm_builder::{build_multisig_component, build_psm_component};
 use miden_lib::account::wallets::BasicWallet;
 use miden_lib::note::create_p2id_note;
 use miden_lib::utils::ScriptBuilder;
@@ -23,13 +23,6 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use miden_processor::AdviceInputs;
-
-/// Additions:
-use miden_lib::transaction::TransactionKernel;
-use miden_objects::{
-    account::AccountComponent,
-    assembly::{Assembler, Library},
-};
 use std::{fs, path::Path};
 
 use miden_objects::account::{StorageMap, StorageSlot};
@@ -53,11 +46,7 @@ type MultisigTestSetup = (
     Vec<BasicAuthenticator<ChaCha20Rng>>,
 );
 
-type PsmTestSetup = (
-    SecretKey,
-    PublicKey,
-    BasicAuthenticator<ChaCha20Rng>,
-);
+type PsmTestSetup = (SecretKey, PublicKey, BasicAuthenticator<ChaCha20Rng>);
 
 /// Sets up secret keys, public keys, and authenticators for multisig testing
 fn setup_keys_and_authenticators(
@@ -151,8 +140,7 @@ fn setup_keys_and_authenticators_with_psm(
     ))
 }
 
-fn setup_keys_and_authenticator_for_psm(
-) -> anyhow::Result<PsmTestSetup> {
+fn setup_keys_and_authenticator_for_psm() -> anyhow::Result<PsmTestSetup> {
     // Change the RNG seed to avoid key collision with other setups!!!
     let mut rng = ChaCha20Rng::from_seed([8u8; 32]);
 
@@ -167,11 +155,7 @@ fn setup_keys_and_authenticator_for_psm(
         rng,
     );
 
-    Ok((
-        psm_sec_key,
-        psm_pub_key,
-        psm_authenticator,
-    ))
+    Ok((psm_sec_key, psm_pub_key, psm_authenticator))
 }
 
 fn create_multisig_account_with_psm_public_key(
@@ -180,39 +164,21 @@ fn create_multisig_account_with_psm_public_key(
     psm_public_key: PublicKey,
     psm_selector: u32,
 ) -> anyhow::Result<Account> {
-    // Create a kernel based assembler for the account components
-    let base_asm: Assembler = TransactionKernel::assembler().with_debug_mode(true);
-
-    // Create PSM component
-    // Load PSM library
-    let psm_code = fs::read_to_string(Path::new("./masm/auth/psm.masm")).unwrap();
-    let psm_lib: Library = create_library(psm_code.clone(), "openzeppelin::psm").unwrap();
-
-    // Create PSM component with the library
-    let multisig_asm = base_asm.clone().with_dynamic_library(psm_lib).unwrap();
-
-     // Slot 0: PSM SELECTOR
-     let mut psm_slots = Vec::with_capacity(1);
+    // --- PSM slots ---
+    let mut psm_slots = Vec::with_capacity(2);
     psm_slots.push(StorageSlot::Value(Word::from([psm_selector, 0, 0, 0])));
 
-    // Slot 1: PSM PUBLIC KEY MAP
     let map_entries_psm_key = vec![(Word::from([0u32, 0, 0, 0]), psm_public_key.to_commitment())];
-    psm_slots.push(StorageSlot::Map(
-        StorageMap::with_entries(map_entries_psm_key).unwrap(),
-    ));
+    psm_slots.push(StorageSlot::Map(StorageMap::with_entries(
+        map_entries_psm_key,
+    )?));
 
-    // Create PSM component
-    let psm_component = AccountComponent::compile(psm_code.clone(), multisig_asm.clone(), psm_slots)
-        .unwrap()
-        .with_supports_all_types();
+    let psm_component = build_psm_component(psm_slots)?;
 
-    let multisig_code = fs::read_to_string(Path::new("./masm/auth/multisig.masm")).unwrap();
-
-    // Multisig storage slots
-    let mut multisig_slots = Vec::with_capacity(5);
+    // --- Multisig slots (senin mevcut kodun aynen) ---
+    let mut multisig_slots = Vec::with_capacity(4);
     let num_approvers = multisig.approvers.len() as u32;
 
-    // Slot 0: THRESHOLD_CONFIG_SLOT
     multisig_slots.push(StorageSlot::Value(Word::from([
         multisig.default_threshold,
         num_approvers,
@@ -220,44 +186,27 @@ fn create_multisig_account_with_psm_public_key(
         0,
     ])));
 
-    // Slot 1: PUBLIC_KEYS_MAP_SLOT
     let map_entries = multisig
         .approvers
         .iter()
         .enumerate()
         .map(|(i, pub_key)| (Word::from([i as u32, 0, 0, 0]), (*pub_key).to_commitment()));
 
-    multisig_slots.push(StorageSlot::Map(
-        StorageMap::with_entries(map_entries).unwrap(),
-    ));
+    multisig_slots.push(StorageSlot::Map(StorageMap::with_entries(map_entries)?));
 
-    // Slot 2: EXECUTED_TXS_SLOT
     multisig_slots.push(StorageSlot::Map(StorageMap::default()));
 
-    // Slot 3: PROC_THRESHOLD_MAP_SLOT
     let proc_threshold_roots = StorageMap::with_entries(
         multisig
             .proc_threshold_map
             .iter()
             .map(|(proc_root, threshold)| (*proc_root, Word::from([*threshold, 0, 0, 0]))),
-    )
-    .unwrap();
+    )?;
     multisig_slots.push(StorageSlot::Map(proc_threshold_roots));
 
-    //// Slot 4: PSM_SELECTOR_SLOT
-    //multisig_slots.push(StorageSlot::Value(Word::from([psm_selector, 0, 0, 0])));
-//
-    //// Slot 5: PSM_PUBLIC_KEY_MAP_SLOT
-    //let map_entries_psm_key = vec![(Word::from([0u32, 0, 0, 0]), psm_public_key.to_commitment())];
-    //multisig_slots.push(StorageSlot::Map(
-    //    StorageMap::with_entries(map_entries_psm_key).unwrap(),
-    //));
+    let multisig_component = build_multisig_component(multisig_slots)?;
 
-    let multisig_component =
-        AccountComponent::compile(multisig_code, multisig_asm.clone(), multisig_slots)
-            .unwrap()
-            .with_supports_all_types();
-
+    // Account build kısmı senin aynen:
     let multisig_psm_account = AccountBuilder::new([0; 32])
         .with_auth_component(multisig_component)
         .with_component(psm_component)
@@ -698,7 +647,7 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         authenticators,
         _psm_secret_key,
         psm_public_key,
-        psm_authenticator,
+        _psm_authenticator,
     ) = setup_keys_and_authenticators_with_psm(2, 2)?;
 
     // Define multisig configuration
@@ -739,7 +688,9 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         setup_keys_and_authenticator_for_psm()?;
 
     // Add new psm public key to advice inputs
-    advice_inputs.stack.extend_from_slice(_new_psm_public_key.to_commitment().as_elements());
+    advice_inputs
+        .stack
+        .extend_from_slice(_new_psm_public_key.to_commitment().as_elements());
 
     let psm_code = fs::read_to_string(Path::new("./masm/auth/psm.masm")).unwrap();
     let multisig_code = fs::read_to_string(Path::new("./masm/auth/multisig.masm")).unwrap();
@@ -756,7 +707,6 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         .with_linked_module("external::multisig", multisig_code.clone())?
         .with_linked_module("openzeppelin::psm", psm_code.clone())?
         .compile_tx_script(tx_script_code)?;
-
 
     // Execute transaction without signatures first to get tx summary
     let tx_context_init = mock_chain
@@ -781,7 +731,6 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
     let sig_2 = authenticators[1]
         .get_signature(public_keys[1].to_commitment().into(), &tx_summary)
         .await?;
-
 
     // Execute transaction with signatures without a need of the PSM signature! - should succeed
     let update_psm_public_key_tx = mock_chain
@@ -809,13 +758,7 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
     let mut updated_multisig_account = multisig_account.clone();
     updated_multisig_account.apply_delta(update_psm_public_key_tx.account_delta())?;
 
-    let storage_key = [
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-        ]
-        .into();
+    let storage_key = [Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)].into();
 
     // Verify the psm public key was actually updated in storage
     let storage_item = updated_multisig_account
@@ -834,7 +777,6 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
     );
 
     // SECTION 2: Create a second transaction signed by the new PSM public key
-    // ================================================================================
     // Now test creating a note with the new psm public key
     // Create a new output note for the second transaction with new psm public key
     let output_note_new = create_p2id_note(
@@ -870,7 +812,7 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         error => panic!("expected abort with tx effects: {error:?}"),
     };
 
-    // Get signatures from both original approvers
+    // Get signatures from approvers
     let msg_new = tx_summary_new.as_ref().to_commitment();
     let tx_summary_new = SigningInputs::TransactionSummary(tx_summary_new);
 
@@ -891,9 +833,8 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         "PSM public key MUST NOT equal any multisig signer key in this test"
     );
 
-
     // SECTION 3: Properly handle multisig PSM authentication with the updated PSM public key
-    // Execute transaction with the old psm public key - shouldn't succeed
+    // Execute transaction with new psm public key - should succeed
     // ================================================================================
     let tx_context_execute_new = new_mock_chain
         .build_tx_context(updated_multisig_account.id(), &[input_note_new.id()], &[])?
