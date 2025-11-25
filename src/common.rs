@@ -8,14 +8,10 @@ use miden_client::{
     store::{InputNoteRecord, NoteFilter},
 };
 
-use miden_lib::transaction::TransactionKernel;
-use miden_objects::{
-    account::AccountComponent,
-    assembly::{Assembler, DefaultSourceManager, Library, LibraryPath, Module, ModuleKind},
-};
+use miden_objects::account::AccountComponent;
+use serde::de::{self, value::Error};
 
-use serde::de::value::Error;
-use std::{fs, path::Path, sync::Arc};
+use std::sync::Arc;
 
 type Client = MidenClient<FilesystemKeyStore<rand::prelude::StdRng>>;
 
@@ -63,30 +59,9 @@ pub async fn instantiate_client(endpoint: Endpoint) -> Result<Client, ClientErro
     Ok(client)
 }
 
-// Creates library
-pub fn create_library(
-    account_code: String,
-    library_path: &str,
-) -> Result<Library, Box<dyn std::error::Error>> {
-    let assembler: Assembler = TransactionKernel::assembler().with_debug_mode(true);
-    let source_manager = Arc::new(DefaultSourceManager::default());
-    let module = Module::parser(ModuleKind::Library).parse_str(
-        LibraryPath::new(library_path)?,
-        account_code,
-        &source_manager,
-    )?;
-    let library = assembler.clone().assemble_library([module])?;
-    Ok(library)
-}
-
 pub async fn create_multisig_account_component() -> Result<AccountComponent, Error> {
-    let assembler: Assembler = TransactionKernel::assembler().with_debug_mode(true);
-    let multisig_code = fs::read_to_string(Path::new("./masm/auth/multisig.masm")).unwrap();
-    let multisig_component = AccountComponent::compile(multisig_code, assembler.clone(), vec![])
-        .unwrap()
-        .with_supports_all_types();
-
-    Ok(multisig_component)
+    crate::masm_builder::build_multisig_component(vec![])
+        .map_err(|e| de::Error::custom(e.to_string()))
 }
 
 // Waits for note
