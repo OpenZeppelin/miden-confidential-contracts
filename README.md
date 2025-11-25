@@ -16,7 +16,15 @@
 cargo test
 ```
 
+## Standards
 
+This folder contains written standards for conventions used in this repository.
+
+Each file documents **how** a specific pattern should be used (storage layout, naming, invariants, and testing rules).
+
+### List
+
+- [PSM Usage Standard](./standards/PSM.md)
 
 ## License
 
