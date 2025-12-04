@@ -3,28 +3,25 @@ name = "miden-confidential-contracts"
 version = "0.0.1"
 edition = "2024"
 default-run = "miden-confidential-contracts"
+rust-version = "1.90"
 
 [dependencies]
-miden-lib     = { git = "https://github.com/0xMiden/miden-base.git", package = "miden-lib",     rev = "f23bf31ffff5973969375cd5c379cb9815aa27ab", default-features = false }
-miden-testing = { git = "https://github.com/0xMiden/miden-base.git", package = "miden-testing", rev = "f23bf31ffff5973969375cd5c379cb9815aa27ab", default-features = false }
-miden-objects = { git = "https://github.com/0xMiden/miden-base.git", package = "miden-objects", rev = "f23bf31ffff5973969375cd5c379cb9815aa27ab", default-features = false }
-miden-tx      = { git = "https://github.com/0xMiden/miden-base.git", package = "miden-tx",      rev = "f23bf31ffff5973969375cd5c379cb9815aa27ab", default-features = false }
+miden-objects = "0.12.4"
+miden-lib = "0.12.4"
+miden-tx = "0.12.4"
+miden-testing = "0.12.4"
 
-miden-crypto = { version = "0.17.1", features = ["executable"] }
-miden-client = { version = "0.11.10", features = ["testing", "tonic", "sqlite"] }
-miden-assembly = "0.18.2"
-miden-processor = "0.18.2"
+miden-crypto = { version = "0.19.0", features = ["executable"] }
+miden-client = "0.12.3"
+miden-assembly = "0.19.1"
+miden-processor = "0.19.1"
 
-rand = { version = "0.9" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
-tokio = { version = "1.40", features = [
-    "rt-multi-thread",
-    "net",
-    "macros",
-    "fs",
-] }
-rand_chacha = "0.9.0"
-miden-client-tools = "0.2.4"
-anyhow = "1.0.100"
-assert_matches = "1.5.0"
+anyhow         = { default-features = false, features = ["backtrace", "std"], version = "1.0" }
+assert_matches = { default-features = false, version = "1.5" }
+rand           = { default-features = false, version = "0.9" }
+rstest         = { version = "0.26" }
+thiserror      = { default-features = false, version = "2.0" }
+tokio          = { default-features = false, features = ["sync"], version = "1" }
+rand_chacha = { default-features = false, version = "0.9" }
