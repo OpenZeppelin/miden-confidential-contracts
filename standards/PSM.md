@@ -68,7 +68,7 @@ Inside `auth__`, we only call the PSM verification helper. All selector handling
 logic is encapsulated in that helper procedure:
 
 ```masm
-use.openzeppelin::psm
+use openzeppelin::psm
 
 #! PSM verification call from `auth__`.
 #! Inputs:  [MSG]
