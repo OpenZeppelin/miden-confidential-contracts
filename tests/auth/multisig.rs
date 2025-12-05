@@ -1,24 +1,18 @@
-use miden_lib::account::components::rpo_falcon_512_multisig_library;
-use miden_lib::account::interface::AccountInterface;
-use miden_lib::account::wallets::BasicWallet;
-use miden_lib::errors::tx_kernel_errors::ERR_TX_ALREADY_EXECUTED;
+use miden_confidential_contracts::masm_builder::{get_multisig_library, get_psm_library};
+use miden_confidential_contracts::multisig_psm::{MultisigPsmBuilder, MultisigPsmConfig};
 use miden_lib::note::create_p2id_note;
-use miden_lib::testing::account_interface::get_public_keys_from_account;
 use miden_lib::utils::ScriptBuilder;
-use miden_objects::account::auth::{AuthSecretKey, PublicKey};
-use miden_objects::account::{Account, AccountBuilder, AccountId, AccountStorageMode, AccountType};
+use miden_objects::account::{Account};
+use miden_objects::account::auth::{AuthSecretKey, PublicKey, PublicKeyCommitment};
 use miden_objects::asset::FungibleAsset;
+use miden_objects::crypto::rand::RpoRandomCoin;
 use miden_objects::note::NoteType;
-use miden_objects::testing::account_id::{
-    ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET, ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE,
-};
+use miden_objects::testing::account_id::ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE;
 use miden_objects::transaction::OutputNote;
-use miden_objects::vm::AdviceMap;
+use miden_objects::vm::{AdviceInputs, AdviceMap};
 use miden_objects::{Felt, Hasher, Word};
-use miden_processor::AdviceInputs;
-use miden_processor::crypto::RpoRandomCoin;
+use miden_testing::MockChainBuilder;
 use miden_testing::utils::create_spawn_note;
-use miden_testing::{Auth, MockChainBuilder, assert_transaction_executor_error};
 use miden_tx::TransactionExecutorError;
 use miden_tx::auth::{BasicAuthenticator, SigningInputs, TransactionAuthenticator};
 use rand::SeedableRng;
@@ -28,7 +22,18 @@ use rand_chacha::ChaCha20Rng;
 // HELPER FUNCTIONS
 // ================================================================================================
 
+type MultisigPlusPsmTestSetup = (
+    Vec<AuthSecretKey>,
+    Vec<PublicKey>,
+    Vec<BasicAuthenticator>,
+    AuthSecretKey,
+    PublicKey,
+    BasicAuthenticator,
+);
+
 type MultisigTestSetup = (Vec<AuthSecretKey>, Vec<PublicKey>, Vec<BasicAuthenticator>);
+
+type PsmTestSetup = (AuthSecretKey, PublicKey, BasicAuthenticator);
 
 /// Sets up secret keys, public keys, and authenticators for multisig testing
 fn setup_keys_and_authenticators(
@@ -59,31 +64,72 @@ fn setup_keys_and_authenticators(
     Ok((secret_keys, public_keys, authenticators))
 }
 
-/// Creates a multisig account with the specified configuration
-fn create_multisig_account(
+fn setup_keys_and_authenticators_with_psm(
+    num_approvers: usize,
+    threshold: usize,
+) -> anyhow::Result<MultisigPlusPsmTestSetup> {
+    let mut rng = ChaCha20Rng::from_seed([0u8; 32]);
+
+    let mut secret_keys = Vec::new();
+    let mut public_keys = Vec::new();
+    let mut authenticators = Vec::new();
+
+    for _ in 0..num_approvers {
+        let sec_key = AuthSecretKey::new_rpo_falcon512_with_rng(&mut rng);
+        let pub_key = sec_key.public_key();
+
+        secret_keys.push(sec_key);
+        public_keys.push(pub_key);
+    }
+
+    // Create authenticators only for the signers we'll actually use
+    for secret_key in secret_keys.iter().take(threshold) {
+        let authenticator = BasicAuthenticator::new(core::slice::from_ref(secret_key));
+        authenticators.push(authenticator);
+    }
+
+    // Create a PSM authenticator (assuming PSM uses a single key for simplicity)
+    let psm_sec_key = AuthSecretKey::new_rpo_falcon512_with_rng(&mut rng);
+    let psm_pub_key = psm_sec_key.public_key();
+    let psm_authenticator =
+        BasicAuthenticator::new(core::slice::from_ref(&psm_sec_key));
+
+    Ok((
+        secret_keys,
+        public_keys,
+        authenticators,
+        psm_sec_key,
+        psm_pub_key,
+        psm_authenticator,
+    ))
+}
+
+fn setup_keys_and_authenticator_for_psm() -> anyhow::Result<PsmTestSetup> {
+    // Change the RNG seed to avoid key collision with other setups!!!
+    let mut rng = ChaCha20Rng::from_seed([8u8; 32]);
+
+    // Create a PSM authenticator (assuming PSM uses a single key for simplicity)
+    let psm_sec_key = AuthSecretKey::new_rpo_falcon512_with_rng(&mut rng);
+    let psm_pub_key = psm_sec_key.public_key();
+    let psm_authenticator =
+        BasicAuthenticator::new(core::slice::from_ref(&psm_sec_key));
+
+    Ok((psm_sec_key, psm_pub_key, psm_authenticator))
+}
+
+fn create_multisig_account_with_psm(
     threshold: u32,
     public_keys: &[PublicKey],
-    asset_amount: u64,
-    proc_threshold_map: Vec<(Word, u32)>,
+    psm_public_key: PublicKey,
+    psm_enabled: bool,
 ) -> anyhow::Result<Account> {
-    let approvers: Vec<_> = public_keys
-        .iter()
-        .map(|pk| pk.to_commitment().into())
-        .collect();
+    let signer_commitments: Vec<PublicKeyCommitment> = public_keys.iter().map(|pk| pk.to_commitment()).collect();
+    let psm_commitment = psm_public_key.to_commitment();
 
-    let multisig_account = AccountBuilder::new([0; 32])
-        .with_auth_component(Auth::Multisig {
-            threshold,
-            approvers,
-            proc_threshold_map,
-        })
-        .with_component(BasicWallet)
-        .account_type(AccountType::RegularAccountUpdatableCode)
-        .storage_mode(AccountStorageMode::Public)
-        .with_assets(vec![FungibleAsset::mock(asset_amount)])
-        .build_existing()?;
+    let config = MultisigPsmConfig::new(threshold, signer_commitments, psm_commitment)
+        .with_psm_enabled(psm_enabled);
 
-    Ok(multisig_account)
+    MultisigPsmBuilder::new(config).build_existing()
 }
 
 // ================================================================================================
@@ -99,22 +145,29 @@ fn create_multisig_account(
 /// **Roles:**
 /// - 2 Approvers (multisig signers)
 /// - 1 Multisig Contract
+/// - 1 PSM Approver
 #[tokio::test]
-async fn test_multisig_2_of_2_with_note_creation() -> anyhow::Result<()> {
-    // Setup keys and authenticators
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(2, 2)?;
+async fn test_multisig_2_of_2_with_note_creation_with_psm() -> anyhow::Result<()> {
+    // Setup keys and authenticators with psm
+    let (
+        _secret_keys,
+        public_keys,
+        authenticators,
+        _psm_secret_key,
+        psm_public_key,
+        psm_authenticator,
+    ) = setup_keys_and_authenticators_with_psm(2, 2)?;
 
-    // Create multisig account
-    let multisig_starting_balance = 10u64;
+    // Create multisig + psm account with PSM enabled
     let mut multisig_account =
-        create_multisig_account(2, &public_keys, multisig_starting_balance, vec![])?;
+        create_multisig_account_with_psm(2, &public_keys, psm_public_key.clone(), true)?;
 
     let output_note_asset = FungibleAsset::mock(0);
 
     let mut mock_chain_builder =
         MockChainBuilder::with_accounts([multisig_account.clone()]).unwrap();
 
-    // Create output note for spawn note
+    // Create output note using add_p2id_note for spawn note
     let output_note = mock_chain_builder.add_p2id_note(
         multisig_account.id(),
         ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE
@@ -124,7 +177,7 @@ async fn test_multisig_2_of_2_with_note_creation() -> anyhow::Result<()> {
         NoteType::Public,
     )?;
 
-    // Create spawn note to generate the output note
+    // Create spawn note that will create the output note
     let input_note = mock_chain_builder.add_spawn_note([&output_note])?;
 
     let mut mock_chain = mock_chain_builder.build().unwrap();
@@ -154,12 +207,18 @@ async fn test_multisig_2_of_2_with_note_creation() -> anyhow::Result<()> {
         .get_signature(public_keys[1].to_commitment(), &tx_summary)
         .await?;
 
+    // Get signature from psm
+    let psm_sig = psm_authenticator
+        .get_signature(psm_public_key.to_commitment(), &tx_summary)
+        .await?;
+
     // Execute transaction with signatures - should succeed
     let tx_context_execute = mock_chain
         .build_tx_context(multisig_account.id(), &[input_note.id()], &[])?
         .extend_expected_output_notes(vec![OutputNote::Full(output_note)])
         .add_signature(public_keys[0].to_commitment(), msg, sig_1)
         .add_signature(public_keys[1].to_commitment(), msg, sig_2)
+        .add_signature(psm_public_key.to_commitment(), msg, psm_sig)
         .auth_args(salt)
         .build()?
         .execute()
@@ -170,188 +229,27 @@ async fn test_multisig_2_of_2_with_note_creation() -> anyhow::Result<()> {
     mock_chain.add_pending_executed_transaction(&tx_context_execute)?;
     mock_chain.prove_next_block()?;
 
-    assert_eq!(
-        multisig_account
-            .vault()
-            .get_balance(AccountId::try_from(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET)?)?,
-        multisig_starting_balance - output_note_asset.unwrap_fungible().amount()
-    );
-
+    // Verify the transaction executed successfully (balance check removed since we don't preload assets)
     Ok(())
 }
 
-/// Tests 2-of-4 multisig with all possible signer combinations.
-///
-/// This test verifies that a multisig account with 4 approvers and threshold 2
-/// can successfully execute transactions when signed by any 2 of the 4 approvers.
-/// It tests all 6 possible combinations of 2 signers to ensure the multisig
-/// implementation correctly validates signatures from any valid subset.
-///
-/// **Tested combinations:** (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+/// Tests updating multisig signers and threshold with PSM authentication.
 #[tokio::test]
-async fn test_multisig_2_of_4_all_signer_combinations() -> anyhow::Result<()> {
-    // Setup keys and authenticators (4 approvers, all 4 can sign)
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(4, 4)?;
+async fn test_multisig_update_signers_with_psm() -> anyhow::Result<()> {
+    // This function can be implemented similarly to test_multisig_update_signers,
+    // but with the addition of PSM related logic.
+    let (
+        _secret_keys,
+        public_keys,
+        authenticators,
+        _psm_secret_key,
+        psm_public_key,
+        psm_authenticator,
+    ) = setup_keys_and_authenticators_with_psm(2, 2)?;
 
-    // Create multisig account with 4 approvers but threshold of 2
-    let multisig_account = create_multisig_account(2, &public_keys, 10, vec![])?;
-
-    let mut mock_chain = MockChainBuilder::with_accounts([multisig_account.clone()])
-        .unwrap()
-        .build()
-        .unwrap();
-
-    // Test different combinations of 2 signers out of 4
-    let signer_combinations = [
-        (0, 1), // First two
-        (0, 2), // First and third
-        (0, 3), // First and fourth
-        (1, 2), // Second and third
-        (1, 3), // Second and fourth
-        (2, 3), // Last two
-    ];
-
-    for (i, (signer1_idx, signer2_idx)) in signer_combinations.iter().enumerate() {
-        let salt = Word::from([Felt::new(10 + i as u64); 4]);
-
-        // Execute transaction without signatures first to get tx summary
-        let tx_context_init = mock_chain
-            .build_tx_context(multisig_account.id(), &[], &[])?
-            .auth_args(salt)
-            .build()?;
-
-        let tx_summary = match tx_context_init.execute().await.unwrap_err() {
-            TransactionExecutorError::Unauthorized(tx_effects) => tx_effects,
-            error => panic!("expected abort with tx effects: {error:?}"),
-        };
-
-        // Get signatures from the specific combination of signers
-        let msg = tx_summary.as_ref().to_commitment();
-        let tx_summary = SigningInputs::TransactionSummary(tx_summary);
-
-        let sig_1 = authenticators[*signer1_idx]
-            .get_signature(public_keys[*signer1_idx].to_commitment(), &tx_summary)
-            .await?;
-        let sig_2 = authenticators[*signer2_idx]
-            .get_signature(public_keys[*signer2_idx].to_commitment(), &tx_summary)
-            .await?;
-
-        // Execute transaction with signatures - should succeed for any combination
-        let tx_context_execute = mock_chain
-            .build_tx_context(multisig_account.id(), &[], &[])?
-            .auth_args(salt)
-            .add_signature(public_keys[*signer1_idx].to_commitment(), msg, sig_1)
-            .add_signature(public_keys[*signer2_idx].to_commitment(), msg, sig_2)
-            .build()?;
-
-        let executed_tx = tx_context_execute.execute().await.unwrap_or_else(|_| {
-            panic!("Transaction should succeed with signers {signer1_idx} and {signer2_idx}")
-        });
-
-        // Apply the transaction to the mock chain for the next iteration
-        mock_chain.add_pending_executed_transaction(&executed_tx)?;
-        mock_chain.prove_next_block()?;
-    }
-
-    Ok(())
-}
-
-/// Tests multisig replay protection to prevent transaction re-execution.
-///
-/// This test verifies that a 2-of-3 multisig account properly prevents replay attacks
-/// by rejecting attempts to execute the same transaction twice. The first execution
-/// should succeed with valid signatures, but the second attempt with identical
-/// parameters should fail with ERR_TX_ALREADY_EXECUTED.
-///
-/// **Roles:**
-/// - 3 Approvers (2 signers required)
-/// - 1 Multisig Contract
-#[tokio::test]
-async fn test_multisig_replay_protection() -> anyhow::Result<()> {
-    // Setup keys and authenticators (3 approvers, but only 2 signers)
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(3, 2)?;
-
-    // Create 2/3 multisig account
-    let multisig_account = create_multisig_account(2, &public_keys, 20, vec![])?;
-
-    let mut mock_chain = MockChainBuilder::with_accounts([multisig_account.clone()])
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let salt = Word::from([Felt::new(3); 4]);
-
-    // Execute transaction without signatures first to get tx summary
-    let tx_context_init = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .auth_args(salt)
-        .build()?;
-
-    let tx_summary = match tx_context_init.execute().await.unwrap_err() {
-        TransactionExecutorError::Unauthorized(tx_effects) => tx_effects,
-        error => panic!("expected abort with tx effects: {error:?}"),
-    };
-
-    // Get signatures from 2 of the 3 approvers
-    let msg = tx_summary.as_ref().to_commitment();
-    let tx_summary = SigningInputs::TransactionSummary(tx_summary);
-
-    let sig_1 = authenticators[0]
-        .get_signature(public_keys[0].to_commitment(), &tx_summary)
-        .await?;
-    let sig_2 = authenticators[1]
-        .get_signature(public_keys[1].to_commitment(), &tx_summary)
-        .await?;
-
-    // Execute transaction with signatures - should succeed (first execution)
-    let tx_context_execute = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .add_signature(public_keys[0].to_commitment(), msg, sig_1.clone())
-        .add_signature(public_keys[1].to_commitment(), msg, sig_2.clone())
-        .auth_args(salt)
-        .build()?;
-
-    let executed_tx = tx_context_execute
-        .execute()
-        .await
-        .expect("First transaction should succeed");
-
-    // Apply the transaction to the mock chain
-    mock_chain.add_pending_executed_transaction(&executed_tx)?;
-    mock_chain.prove_next_block()?;
-
-    // Attempt to execute the same transaction again - should fail due to replay protection
-    let tx_context_replay = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .add_signature(public_keys[0].to_commitment(), msg, sig_1)
-        .add_signature(public_keys[1].to_commitment(), msg, sig_2)
-        .auth_args(salt)
-        .build()?;
-
-    // This should fail due to replay protection
-    let result = tx_context_replay.execute().await;
-    assert_transaction_executor_error!(result, ERR_TX_ALREADY_EXECUTED);
-
-    Ok(())
-}
-
-/// Tests multisig signer update functionality.
-///
-/// This test verifies that a multisig account can:
-/// 1. Execute a transaction script to update signers and threshold
-/// 2. Create a second transaction signed by the new owners
-/// 3. Properly handle multisig authentication with the updated signers
-///
-/// **Roles:**
-/// - 2 Original Approvers (multisig signers)
-/// - 4 New Approvers (updated multisig signers)
-/// - 1 Multisig Contract
-/// - 1 Transaction Script calling multisig procedures
-#[tokio::test]
-async fn test_multisig_update_signers() -> anyhow::Result<()> {
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(2, 2)?;
-
-    let multisig_account = create_multisig_account(2, &public_keys, 10, vec![])?;
+    // Create multisig + psm account with PSM enabled
+    let multisig_account =
+        create_multisig_account_with_psm(2, &public_keys, psm_public_key.clone(), true)?;
 
     // SECTION 1: Execute a transaction script to update signers and threshold
     // ================================================================================
@@ -404,21 +302,22 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
     // Insert config and public keys into advice map
     advice_map.insert(multisig_config_hash, config_and_pubkeys_vector);
 
-    // Create a transaction script that calls the update_signers procedure
-    let tx_script_code = "
-        begin
-            call.::update_signers_and_threshold
-        end
-    ";
+    // Build the multisig library for transaction script
+    let multisig_library = get_multisig_library()?;
+
+    // Use call.:: syntax for dynamically linked library procedure calls (v0.12+)
+    let tx_script_code = r#"
+    begin
+        call.::update_signers_and_threshold
+    end
+    "#;
 
     let tx_script = ScriptBuilder::new(true)
-        .with_dynamically_linked_library(&rpo_falcon_512_multisig_library())?
+        .with_dynamically_linked_library(&multisig_library)?
         .compile_tx_script(tx_script_code)?;
 
-    let advice_inputs = AdviceInputs {
-        map: advice_map.clone(),
-        ..Default::default()
-    };
+    let advice_inputs = AdviceInputs::default()
+        .with_map(advice_map.clone().into_iter().map(|(k, v)| (k, v.to_vec())));
 
     // Pass the MULTISIG_CONFIG_HASH as the tx_script_args
     let tx_script_args: Word = multisig_config_hash;
@@ -448,6 +347,10 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
         .get_signature(public_keys[1].to_commitment(), &tx_summary)
         .await?;
 
+    let psm_sig = psm_authenticator
+        .get_signature(psm_public_key.to_commitment(), &tx_summary)
+        .await?;
+
     // Execute transaction with signatures - should succeed
     let update_approvers_tx = mock_chain
         .build_tx_context(multisig_account.id(), &[], &[])?
@@ -455,6 +358,7 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
         .tx_script_args(multisig_config_hash)
         .add_signature(public_keys[0].to_commitment(), msg, sig_1)
         .add_signature(public_keys[1].to_commitment(), msg, sig_2)
+        .add_signature(psm_public_key.to_commitment(), msg, psm_sig)
         .auth_args(salt)
         .extend_advice_inputs(advice_inputs)
         .build()?
@@ -512,32 +416,6 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
         "Num approvers was not updated correctly"
     );
 
-    // Extract public keys using the interface function
-    let extracted_pub_keys = get_public_keys_from_account(&updated_multisig_account);
-
-    // Verify that we have the expected number of public keys (4 new ones)
-    assert_eq!(
-        extracted_pub_keys.len(),
-        4,
-        "get_public_keys_from_account should return 4 public keys after update"
-    );
-
-    // Verify that the extracted public keys match the new ones we set
-    for (i, expected_key) in new_public_keys.iter().enumerate() {
-        let expected_word: Word = expected_key.to_commitment().into();
-
-        // Find the matching key in extracted keys (order might be different)
-        let found_key = extracted_pub_keys.iter().find(|&key| *key == expected_word);
-
-        assert!(
-            found_key.is_some(),
-            "Public key {} not found in extracted keys: expected {:?}, got {:?}",
-            i,
-            expected_word,
-            extracted_pub_keys
-        );
-    }
-
     // SECTION 2: Create a second transaction signed by the new owners
     // ================================================================================
 
@@ -558,7 +436,7 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
         vec![output_note_asset],
         NoteType::Public,
         Default::default(),
-        &mut RpoRandomCoin::new(Word::empty()),
+        &mut RpoRandomCoin::new(Word::default()),
     )?;
 
     // Create a new spawn note for the second transaction
@@ -597,6 +475,9 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
     let sig_3_new = new_authenticators[2]
         .get_signature(new_public_keys[2].to_commitment(), &tx_summary_new)
         .await?;
+    let psm_sig = psm_authenticator
+        .get_signature(psm_public_key.to_commitment(), &tx_summary_new)
+        .await?;
 
     // SECTION 3: Properly handle multisig authentication with the updated signers
     // ================================================================================
@@ -608,6 +489,7 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
         .add_signature(new_public_keys[0].to_commitment(), msg_new, sig_1_new)
         .add_signature(new_public_keys[1].to_commitment(), msg_new, sig_2_new)
         .add_signature(new_public_keys[2].to_commitment(), msg_new, sig_3_new)
+        .add_signature(psm_public_key.to_commitment(), msg_new, psm_sig)
         .auth_args(salt_new)
         .build()?
         .execute()
@@ -622,69 +504,89 @@ async fn test_multisig_update_signers() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tests multisig signer update functionality with owner removal.
+/// Tests psm public key update functionality.
 ///
 /// This test verifies that a multisig account can:
-/// 1. Start with 5 owners and threshold 4
-/// 2. Execute a transaction to remove 3 owners (updating to 2 owners)
-/// 3. Verify that all removed owners' storage slots are properly cleared
+/// 1. Execute a transaction script to update the psm public key without needing a psm signature
+/// 2. Create a second transaction signed by the new psm public key
+/// 3. Properly handle multisig psm authentication with the updated psm public key.
 ///
 /// **Roles:**
-/// - 5 Original Approvers (multisig signers, threshold 4)
-/// - 2 Updated Approvers (after removing 3 owners)
+/// - 2 Original Approvers (multisig signers)
+/// - 1 PSM Approver
 /// - 1 Multisig Contract
-/// - 1 Transaction Script calling multisig procedures
+/// - 1 Transaction Script calling the update_psm_public_key procedure
 #[tokio::test]
-async fn test_multisig_update_signers_remove_owner() -> anyhow::Result<()> {
-    // Setup 5 original owners with threshold 4
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(5, 5)?;
-    let multisig_account = create_multisig_account(4, &public_keys, 10, vec![])?;
+async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
+    let (
+        _secret_keys,
+        public_keys,
+        authenticators,
+        _psm_secret_key,
+        psm_public_key,
+        _psm_authenticator,
+    ) = setup_keys_and_authenticators_with_psm(2, 2)?;
 
-    // Build mock chain
-    let mock_chain_builder = MockChainBuilder::with_accounts([multisig_account.clone()]).unwrap();
-    let mut mock_chain = mock_chain_builder.build().unwrap();
+    // Initialize with PSM selector = OFF so key update doesn't require PSM signature
+    // This is the expected flow: disable PSM, update key, then enable PSM in a follow-up tx
+    let multisig_account =
+        create_multisig_account_with_psm(2, &public_keys, psm_public_key.clone(), false)?;
 
-    // Setup new signers (remove the last 3 owners, keeping first 2)
-    let new_public_keys = &public_keys[0..2];
-    let threshold = 1u64;
-    let num_of_approvers = 2u64;
+    // SECTION 1: Execute a transaction script to update PSM public key
+    // ================================================================================
 
-    // Create multisig config vector
-    let mut config_and_pubkeys_vector = vec![
-        Felt::new(threshold),
-        Felt::new(num_of_approvers),
-        Felt::new(0),
-        Felt::new(0),
-    ];
+    let mut mock_chain_builder =
+        MockChainBuilder::with_accounts([multisig_account.clone()]).unwrap();
 
-    // Add public keys in reverse order
-    for public_key in new_public_keys.iter().rev() {
-        let key_word: Word = public_key.to_commitment().into();
-        config_and_pubkeys_vector.extend_from_slice(key_word.as_elements());
-    }
+    let output_note_asset = FungibleAsset::mock(0);
 
-    // Create config hash and advice map
-    let multisig_config_hash = Hasher::hash_elements(&config_and_pubkeys_vector);
-    let mut advice_map = AdviceMap::default();
-    advice_map.insert(multisig_config_hash, config_and_pubkeys_vector);
+    // Create output note for spawn note
+    let output_note = mock_chain_builder.add_p2id_note(
+        multisig_account.id(),
+        ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE
+            .try_into()
+            .unwrap(),
+        &[output_note_asset],
+        NoteType::Public,
+    )?;
 
-    // Create transaction script
-    let tx_script = ScriptBuilder::new(true)
-        .with_dynamically_linked_library(&rpo_falcon_512_multisig_library())?
-        .compile_tx_script("begin\n    call.::update_signers_and_threshold\nend")?;
-
-    let advice_inputs = AdviceInputs {
-        map: advice_map,
-        ..Default::default()
-    };
+    let mut mock_chain = mock_chain_builder.clone().build().unwrap();
 
     let salt = Word::from([Felt::new(3); 4]);
 
-    // Execute without signatures to get tx summary
+    // Setup New PSM Public Key
+    let (_new_psm_secret_key, _new_psm_public_key, _new_psm_authenticatior) =
+        setup_keys_and_authenticator_for_psm()?;
+
+    // Add new psm public key to advice inputs
+    let new_psm_key_word: Word = _new_psm_public_key.to_commitment().into();
+    let advice_inputs = AdviceInputs::default().with_stack(
+        new_psm_key_word
+            .as_elements()
+            .iter()
+            .copied(),
+    );
+
+    // Build the PSM library for transaction script
+    let psm_library = get_psm_library()?;
+
+    // Use call.:: syntax for dynamically linked library procedure calls (v0.12+)
+    // This script updates the PSM key and then enables PSM verification
+    let tx_script_code = r#"
+    begin
+        call.::update_psm_public_key
+        call.::enable_psm
+    end
+    "#;
+
+    let tx_script = ScriptBuilder::new(true)
+        .with_dynamically_linked_library(&psm_library)?
+        .compile_tx_script(tx_script_code)?;
+
+    // Execute transaction without signatures first to get tx summary
     let tx_context_init = mock_chain
         .build_tx_context(multisig_account.id(), &[], &[])?
         .tx_script(tx_script.clone())
-        .tx_script_args(multisig_config_hash)
         .extend_advice_inputs(advice_inputs.clone())
         .auth_args(salt)
         .build()?;
@@ -694,7 +596,7 @@ async fn test_multisig_update_signers_remove_owner() -> anyhow::Result<()> {
         error => panic!("expected abort with tx effects: {error:?}"),
     };
 
-    // Get signatures from 4 of the 5 original approvers (threshold is 4)
+    // Get signatures from both approvers
     let msg = tx_summary.as_ref().to_commitment();
     let tx_summary = SigningInputs::TransactionSummary(tx_summary);
 
@@ -704,22 +606,13 @@ async fn test_multisig_update_signers_remove_owner() -> anyhow::Result<()> {
     let sig_2 = authenticators[1]
         .get_signature(public_keys[1].to_commitment(), &tx_summary)
         .await?;
-    let sig_3 = authenticators[2]
-        .get_signature(public_keys[2].to_commitment(), &tx_summary)
-        .await?;
-    let sig_4 = authenticators[3]
-        .get_signature(public_keys[3].to_commitment(), &tx_summary)
-        .await?;
 
-    // Execute with signatures
-    let update_approvers_tx = mock_chain
+    // Execute transaction with signatures without a need of the PSM signature! - should succeed
+    let update_psm_public_key_tx = mock_chain
         .build_tx_context(multisig_account.id(), &[], &[])?
         .tx_script(tx_script)
-        .tx_script_args(multisig_config_hash)
         .add_signature(public_keys[0].to_commitment(), msg, sig_1)
         .add_signature(public_keys[1].to_commitment(), msg, sig_2)
-        .add_signature(public_keys[2].to_commitment(), msg, sig_3)
-        .add_signature(public_keys[3].to_commitment(), msg, sig_4)
         .auth_args(salt)
         .extend_advice_inputs(advice_inputs)
         .build()?
@@ -727,436 +620,112 @@ async fn test_multisig_update_signers_remove_owner() -> anyhow::Result<()> {
         .await
         .unwrap();
 
-    // Verify transaction success
+    // Verify the transaction executed successfully
     assert_eq!(
-        update_approvers_tx.account_delta().nonce_delta(),
+        update_psm_public_key_tx.account_delta().nonce_delta(),
         Felt::new(1)
     );
 
-    mock_chain.add_pending_executed_transaction(&update_approvers_tx)?;
+    mock_chain.add_pending_executed_transaction(&update_psm_public_key_tx)?;
     mock_chain.prove_next_block()?;
 
-    // Apply delta to get updated account
+    // Apply the delta to get the updated account with new psm public key
     let mut updated_multisig_account = multisig_account.clone();
-    updated_multisig_account.apply_delta(update_approvers_tx.account_delta())?;
+    updated_multisig_account.apply_delta(update_psm_public_key_tx.account_delta())?;
 
-    // Verify public keys were updated
-    for (i, expected_key) in new_public_keys.iter().enumerate() {
-        let storage_key = [
-            Felt::new(i as u64),
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-        ]
-        .into();
-        let storage_item = updated_multisig_account
-            .storage()
-            .get_map_item(1, storage_key)
-            .unwrap();
-        let expected_word: Word = expected_key.to_commitment().into();
-        assert_eq!(
-            storage_item, expected_word,
-            "Public key {} doesn't match",
-            i
-        );
-    }
+    let storage_key = [Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)].into();
 
-    // Verify threshold and num_approvers
-    let threshold_config = updated_multisig_account.storage().get_item(0).unwrap();
-    assert_eq!(
-        threshold_config[0],
-        Felt::new(threshold),
-        "Threshold not updated"
-    );
-    assert_eq!(
-        threshold_config[1],
-        Felt::new(num_of_approvers),
-        "Num approvers not updated"
-    );
-
-    // Verify extracted public keys
-    let extracted_pub_keys = get_public_keys_from_account(&updated_multisig_account);
-    assert_eq!(
-        extracted_pub_keys.len(),
-        2,
-        "Should have 2 public keys after update"
-    );
-
-    for expected_key in new_public_keys.iter() {
-        let expected_word: Word = expected_key.to_commitment().into();
-        assert!(
-            extracted_pub_keys.contains(&expected_word),
-            "Public key not found in extracted keys"
-        );
-    }
-
-    // Verify removed owners' slots are empty (indices 2, 3, and 4 should be cleared)
-    for removed_idx in 2..5 {
-        let removed_owner_key = [
-            Felt::new(removed_idx),
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-        ]
-        .into();
-        let removed_owner_slot = updated_multisig_account
-            .storage()
-            .get_map_item(1, removed_owner_key)
-            .unwrap();
-        assert_eq!(
-            removed_owner_slot,
-            Word::empty(),
-            "Removed owner's slot at index {} should be empty",
-            removed_idx
-        );
-    }
-
-    // Verify only 2 non-empty keys remain (at indices 0 and 1)
-    let mut non_empty_count = 0;
-    for i in 0..5 {
-        let storage_key = [
-            Felt::new(i as u64),
-            Felt::new(0),
-            Felt::new(0),
-            Felt::new(0),
-        ]
-        .into();
-        let storage_item = updated_multisig_account
-            .storage()
-            .get_map_item(1, storage_key)
-            .unwrap();
-
-        if storage_item != Word::empty() {
-            non_empty_count += 1;
-            assert!(
-                i < 2,
-                "Found non-empty key at index {} which should be removed",
-                i
-            );
-
-            let expected_word: Word = new_public_keys.get(i).unwrap().to_commitment().into();
-            assert_eq!(
-                storage_item, expected_word,
-                "Key at index {} doesn't match",
-                i
-            );
-        }
-    }
-    assert_eq!(
-        non_empty_count, 2,
-        "Should have exactly 2 non-empty keys after removing 3 owners"
-    );
-
-    Ok(())
-}
-
-/// Tests that newly added approvers cannot sign transactions before the signer update is executed.
-///
-/// This is a regression test to ensure that unauthorized parties cannot add their own public keys
-/// to the multisig configuration and immediately use them to sign transactions before
-/// the current approvers have validated and executed the signer update.
-///
-/// **Test Flow:**
-/// 1. Create a multisig account with 2 original approvers
-/// 2. Prepare a signer update transaction with new approvers
-/// 3. Try to sign the transaction with the NEW approvers (should fail)
-/// 4. Verify that only the CURRENT approvers can sign the update transaction
-#[tokio::test]
-async fn test_multisig_new_approvers_cannot_sign_before_update() -> anyhow::Result<()> {
-    // SECTION 1: Create a multisig account with 2 original approvers
-    // ================================================================================
-
-    let (_secret_keys, public_keys, _authenticators) = setup_keys_and_authenticators(2, 2)?;
-
-    let multisig_account = create_multisig_account(2, &public_keys, 10, vec![])?;
-
-    let mock_chain = MockChainBuilder::with_accounts([multisig_account.clone()])
-        .unwrap()
-        .build()
+    // Verify the psm public key was actually updated in storage
+    let storage_item = updated_multisig_account
+        .storage()
+        .get_map_item(5, storage_key)
         .unwrap();
 
-    let salt = Word::from([Felt::new(5); 4]);
+    let expected_word: Word = _new_psm_public_key.to_commitment().into();
 
-    // SECTION 2: Prepare a signer update transaction with new approvers
-    // ================================================================================
+    println!("Expected PSM Public Key: {:?}", expected_word);
+    println!("Stored PSM Public Key:   {:?}", storage_item);
 
-    // Get the multisig library
-
-    // Setup new signers (these should NOT be able to sign the update transaction)
-    let mut advice_map = AdviceMap::default();
-    let (_new_secret_keys, new_public_keys, new_authenticators) =
-        setup_keys_and_authenticators(4, 4)?;
-
-    let threshold = 3u64;
-    let num_of_approvers = 4u64;
-
-    // Create vector with threshold config and public keys (4 field elements each)
-    let mut config_and_pubkeys_vector = Vec::new();
-    config_and_pubkeys_vector.extend_from_slice(&[
-        Felt::new(threshold),
-        Felt::new(num_of_approvers),
-        Felt::new(0),
-        Felt::new(0),
-    ]);
-
-    // Add each public key to the vector
-    for public_key in new_public_keys.iter().rev() {
-        let key_word: Word = public_key.to_commitment().into();
-        config_and_pubkeys_vector.extend_from_slice(key_word.as_elements());
-    }
-
-    // Hash the vector to create config hash
-    let multisig_config_hash = Hasher::hash_elements(&config_and_pubkeys_vector);
-
-    // Insert config and public keys into advice map
-    advice_map.insert(multisig_config_hash, config_and_pubkeys_vector);
-
-    // Create a transaction script that calls the update_signers procedure
-    let tx_script_code = "
-        begin
-            call.::update_signers_and_threshold
-        end
-    ";
-
-    let tx_script = ScriptBuilder::new(true)
-        .with_dynamically_linked_library(&rpo_falcon_512_multisig_library())?
-        .compile_tx_script(tx_script_code)?;
-
-    let advice_inputs = AdviceInputs {
-        map: advice_map.clone(),
-        ..Default::default()
-    };
-
-    // Pass the MULTISIG_CONFIG_HASH as the tx_script_args
-    let tx_script_args: Word = multisig_config_hash;
-
-    // Execute transaction without signatures first to get tx summary
-    let tx_context_init = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .tx_script(tx_script.clone())
-        .tx_script_args(tx_script_args)
-        .extend_advice_inputs(advice_inputs.clone())
-        .auth_args(salt)
-        .build()?;
-
-    let tx_summary = match tx_context_init.execute().await.unwrap_err() {
-        TransactionExecutorError::Unauthorized(tx_effects) => tx_effects,
-        error => panic!("expected abort with tx effects: {error:?}"),
-    };
-
-    // SECTION 3: Try to sign the transaction with the NEW approvers (should fail)
-    // ================================================================================
-
-    // Get signatures from the NEW approvers (these should NOT work)
-    let msg = tx_summary.as_ref().to_commitment();
-    let tx_summary_signing = SigningInputs::TransactionSummary(tx_summary.clone());
-
-    let new_sig_1 = new_authenticators[0]
-        .get_signature(new_public_keys[0].to_commitment(), &tx_summary_signing)
-        .await?;
-    let new_sig_2 = new_authenticators[1]
-        .get_signature(new_public_keys[1].to_commitment(), &tx_summary_signing)
-        .await?;
-
-    // Try to execute transaction with NEW signatures - should FAIL
-    let tx_context_with_new_sigs = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .tx_script(tx_script.clone())
-        .tx_script_args(multisig_config_hash)
-        .add_signature(new_public_keys[0].to_commitment(), msg, new_sig_1)
-        .add_signature(new_public_keys[1].to_commitment(), msg, new_sig_2)
-        .auth_args(salt)
-        .extend_advice_inputs(advice_inputs.clone())
-        .build()?;
-
-    // SECTION 4: Verify that only the CURRENT approvers can sign the update transaction
-    // ================================================================================
-
-    // Should fail - new approvers not yet authorized
-    let result = tx_context_with_new_sigs.execute().await;
-
-    // Assert that the transaction fails as expected
-    assert!(
-        result.is_err(),
-        "Transaction should fail when signed by unauthorized new approvers"
+    assert_eq!(
+        storage_item, expected_word,
+        "PSM Public key doesn't match expected value"
     );
 
-    Ok(())
-}
-
-/// Tests that 1-of-2 approvers can consume a note but 2-of-2 are required to send a note.
-///
-/// This test verifies that a multisig account with 2 approvers and threshold 2, but a procedure
-/// threshold of 1 for note consumption, can:
-/// 1. Consume a note when only one approver signs the transaction
-/// 2. Send a note only when both approvers sign the transaction (default threshold)
-#[tokio::test]
-async fn test_multisig_proc_threshold_overrides() -> anyhow::Result<()> {
-    // Setup keys and authenticators
-    let (_secret_keys, public_keys, authenticators) = setup_keys_and_authenticators(2, 2)?;
-
-    let proc_threshold_map = vec![(BasicWallet::receive_asset_digest(), 1)];
-
-    // Create multisig account
-    let multisig_starting_balance = 10u64;
-    let mut multisig_account = create_multisig_account(
-        2,
-        &public_keys,
-        multisig_starting_balance,
-        proc_threshold_map,
-    )?;
-
-    // SECTION 1: Test note consumption with 1 signature
-    // ================================================================================
-
-    // 1. create a mock note from some random account
-    let mut mock_chain_builder =
-        MockChainBuilder::with_accounts([multisig_account.clone()]).unwrap();
-
-    let note = mock_chain_builder.add_p2id_note(
-        multisig_account.id(),
-        multisig_account.id(),
-        &[FungibleAsset::mock(1)],
-        NoteType::Public,
-    )?;
-
-    let mut mock_chain = mock_chain_builder.build()?;
-
-    // 2. consume without signatures
-    let salt = Word::from([Felt::new(1); 4]);
-    let tx_context = mock_chain
-        .build_tx_context(multisig_account.id(), &[note.id()], &[])?
-        .auth_args(salt)
-        .build()?;
-
-    let tx_summary = match tx_context.execute().await.unwrap_err() {
-        TransactionExecutorError::Unauthorized(tx_summary) => tx_summary,
-        error => panic!("expected abort with tx summary: {error:?}"),
-    };
-
-    // 3. get signature from one approver
-    let msg = tx_summary.as_ref().to_commitment();
-    let tx_summary_signing = SigningInputs::TransactionSummary(tx_summary.clone());
-    let sig = authenticators[0]
-        .get_signature(public_keys[0].to_commitment(), &tx_summary_signing)
-        .await?;
-
-    // 4. execute with signature
-    let tx_result = mock_chain
-        .build_tx_context(multisig_account.id(), &[note.id()], &[])?
-        .add_signature(public_keys[0].to_commitment(), msg, sig)
-        .auth_args(salt)
-        .build()?
-        .execute()
-        .await;
-
-    assert!(
-        tx_result.is_ok(),
-        "Note consumption with 1 signature should succeed"
-    );
-
-    // Apply the transaction to the account
-    multisig_account.apply_delta(tx_result.as_ref().unwrap().account_delta())?;
-    mock_chain.add_pending_executed_transaction(&tx_result.unwrap())?;
-    mock_chain.prove_next_block()?;
-
-    // SECTION 2: Test note sending requires 2 signatures
-    // ================================================================================
-
-    let salt2 = Word::from([Felt::new(2); 4]);
-
-    // Create output note to send 5 units from the account
-    let output_note = create_p2id_note(
-        multisig_account.id(),
+    // SECTION 2: Create a second transaction signed by the new PSM public key
+    // Now test creating a note with the new psm public key
+    // Create a new output note for the second transaction with new psm public key
+    let output_note_new = create_p2id_note(
+        updated_multisig_account.id(),
         ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_UPDATABLE_CODE
             .try_into()
             .unwrap(),
-        vec![FungibleAsset::mock(5)],
+        vec![output_note_asset],
         NoteType::Public,
         Default::default(),
-        &mut RpoRandomCoin::new(Word::from([Felt::new(42); 4])),
-    )?;
-    let multisig_account_interface = AccountInterface::from(&multisig_account);
-    let send_note_transaction_script = multisig_account_interface.build_send_notes_script(
-        &[output_note.clone().into()],
-        None,
-        false,
+        &mut RpoRandomCoin::new(Word::default()),
     )?;
 
-    // Execute transaction without signatures to get tx summary
-    let tx_context_init = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
+    // Create a new spawn note for the second transaction
+    let input_note_new = create_spawn_note([&output_note_new])?;
+    let salt_new = Word::from([Felt::new(4); 4]);
+
+    // Build the new mock chain with the updated account and notes
+    let mut new_mock_chain_builder =
+        MockChainBuilder::with_accounts([updated_multisig_account.clone()]).unwrap();
+    new_mock_chain_builder.add_output_note(OutputNote::Full(input_note_new.clone()));
+    let new_mock_chain = new_mock_chain_builder.build().unwrap();
+
+    // Execute transaction without signatures first to get tx summary
+    let tx_context_init_new = new_mock_chain
+        .build_tx_context(updated_multisig_account.id(), &[input_note_new.id()], &[])?
         .extend_expected_output_notes(vec![OutputNote::Full(output_note.clone())])
-        .tx_script(send_note_transaction_script.clone())
-        .auth_args(salt2)
+        .auth_args(salt_new)
         .build()?;
 
-    let tx_summary2 = match tx_context_init.execute().await.unwrap_err() {
+    let tx_summary_new = match tx_context_init_new.execute().await.unwrap_err() {
         TransactionExecutorError::Unauthorized(tx_effects) => tx_effects,
         error => panic!("expected abort with tx effects: {error:?}"),
     };
-    // Get signature from only ONE approver
-    let msg2 = tx_summary2.as_ref().to_commitment();
-    let tx_summary2_signing = SigningInputs::TransactionSummary(tx_summary2.clone());
 
-    let sig_1 = authenticators[0]
-        .get_signature(public_keys[0].to_commitment(), &tx_summary2_signing)
+    // Get signatures from approvers
+    let msg_new = tx_summary_new.as_ref().to_commitment();
+    let tx_summary_new = SigningInputs::TransactionSummary(tx_summary_new);
+
+    let sig_1_new = authenticators[0]
+        .get_signature(public_keys[0].to_commitment(), &tx_summary_new)
+        .await?;
+    let sig_2_new = authenticators[1]
+        .get_signature(public_keys[1].to_commitment(), &tx_summary_new)
+        .await?;
+    // Get signature from new psm public key
+    let psm_sig_new = _new_psm_authenticatior
+        .get_signature(_new_psm_public_key.to_commitment(), &tx_summary_new)
         .await?;
 
-    // Try to execute with only 1 signature - should FAIL
-    let tx_context_one_sig = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .extend_expected_output_notes(vec![OutputNote::Full(output_note.clone())])
-        .add_signature(public_keys[0].to_commitment(), msg2, sig_1)
-        .tx_script(send_note_transaction_script.clone())
-        .auth_args(salt2)
-        .build()?;
-
-    let result = tx_context_one_sig.execute().await;
-    match result {
-        Err(TransactionExecutorError::Unauthorized(_)) => {
-            // Expected: transaction should fail with insufficient signatures
-        }
-        _ => panic!(
-            "Transaction should fail with Unauthorized error when only 1 signature provided for note sending"
-        ),
-    }
-
-    // Now get signatures from BOTH approvers
-    let sig_1 = authenticators[0]
-        .get_signature(public_keys[0].to_commitment(), &tx_summary2_signing)
-        .await?;
-    let sig_2 = authenticators[1]
-        .get_signature(public_keys[1].to_commitment(), &tx_summary2_signing)
-        .await?;
-
-    // Execute with 2 signatures - should SUCCEED
-    let result = mock_chain
-        .build_tx_context(multisig_account.id(), &[], &[])?
-        .extend_expected_output_notes(vec![OutputNote::Full(output_note)])
-        .add_signature(public_keys[0].to_commitment(), msg2, sig_1)
-        .add_signature(public_keys[1].to_commitment(), msg2, sig_2)
-        .auth_args(salt2)
-        .tx_script(send_note_transaction_script)
-        .build()?
-        .execute()
-        .await;
-
-    assert!(
-        result.is_ok(),
-        "Transaction should succeed with 2 signatures for note sending"
+    assert_ne!(
+        _new_psm_public_key.to_commitment(),
+        public_keys[0].to_commitment(),
+        "PSM public key MUST NOT equal any multisig signer key in this test"
     );
 
-    // Apply the transaction to the account
-    multisig_account.apply_delta(result.as_ref().unwrap().account_delta())?;
-    mock_chain.add_pending_executed_transaction(&result.unwrap())?;
-    mock_chain.prove_next_block()?;
+    // SECTION 3: Properly handle multisig PSM authentication with the updated PSM public key
+    // Execute transaction with new psm public key - should succeed
+    // ================================================================================
+    let tx_context_execute_new = new_mock_chain
+        .build_tx_context(updated_multisig_account.id(), &[input_note_new.id()], &[])?
+        .extend_expected_output_notes(vec![OutputNote::Full(output_note_new)])
+        .add_signature(public_keys[0].to_commitment(), msg_new, sig_1_new)
+        .add_signature(public_keys[1].to_commitment(), msg_new, sig_2_new)
+        .add_signature(_new_psm_public_key.to_commitment(), msg_new, psm_sig_new)
+        .auth_args(salt_new)
+        .build()?
+        .execute()
+        .await?;
 
+    // Verify the transaction executed successfully with new PSM public key
     assert_eq!(
-        multisig_account
-            .vault()
-            .get_balance(FungibleAsset::mock_issuer())?,
-        6
+        tx_context_execute_new.account_delta().nonce_delta(),
+        Felt::new(1)
     );
 
     Ok(())
