@@ -231,8 +231,8 @@ impl MultisigPsmBuilder {
 
     fn build_psm_slots(&self) -> Result<Vec<StorageSlot>> {
         // Slot 0: PSM selector
-        let selector = if self.config.psm_enabled { 1u32 } else { 0u32 };
-        let slot_0 = StorageSlot::Value(Word::from([selector, 0, 0, 0]));
+        // Always start the PSM enabled
+        let slot_0 = StorageSlot::Value(Word::from([1u32, 0, 0, 0]));
 
         // Slot 1: PSM public key map
         let psm_key_entries = vec![(Word::from([0u32, 0, 0, 0]), self.config.psm_commitment.into())];
