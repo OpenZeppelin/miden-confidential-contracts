@@ -76,7 +76,7 @@ const AUTH_UNAUTHORIZED_EVENT = event("miden::auth::unauthorized")
 #! Notes:
 #! - Sets PSM_SELECTOR_SLOT to PSM_ON (1)
 #! - After this, transactions will require PSM signature verification
-pub proc enable_psm
+proc enable_psm
     push.PSM_ON
     # => [PSM_ON]
 
@@ -98,7 +98,7 @@ end
 #! Notes:
 #! - Sets PSM_SELECTOR_SLOT to PSM_OFF (0)
 #! - After this, transactions will NOT require PSM signature verification
-pub proc disable_psm
+proc disable_psm
     push.PSM_OFF
     # => [PSM_OFF]
 
