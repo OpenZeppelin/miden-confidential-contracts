@@ -76,7 +76,7 @@ const AUTH_UNAUTHORIZED_EVENT = event("miden::auth::unauthorized")
 #! Notes:
 #! - Sets PSM_SELECTOR_SLOT to PSM_ON (1)
 #! - After this, transactions will require PSM signature verification
-pub proc enable_psm
+proc.enable_psm
     push.PSM_ON
     # => [PSM_ON]
 
@@ -98,7 +98,7 @@ end
 #! Notes:
 #! - Sets PSM_SELECTOR_SLOT to PSM_OFF (0)
 #! - After this, transactions will NOT require PSM signature verification
-pub proc disable_psm
+proc.disable_psm
     push.PSM_OFF
     # => [PSM_OFF]
 
@@ -124,6 +124,7 @@ end
 #! - To update the key without requiring PSM signature, ensure
 #!   PSM_SELECTOR_SLOT = 0 (OFF) before calling this.
 pub proc update_psm_public_key
+    exec.disable_psm
     # ------ Update the PSM public key ------
     adv_loadw
     # => [PUB_KEY]
@@ -157,9 +158,10 @@ end
 #! - Selector value is read from initial storage state
 pub proc verify_psm_signature(msg: BeWord)
     push.PSM_SELECTOR_SLOT
-    exec.active_account::get_initial_item
+    exec.active_account::get_item
     drop drop drop
     # => [selector, MSG]
+    debug.stack
 
     push.1 eq
     if.true
@@ -173,4 +175,5 @@ pub proc verify_psm_signature(msg: BeWord)
         end
     end
     # => [MSG]
+    exec.enable_psm
 end
