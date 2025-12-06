@@ -527,7 +527,8 @@ async fn test_multisig_update_psm_public_key() -> anyhow::Result<()> {
         _psm_authenticator,
     ) = setup_keys_and_authenticators_with_psm(2, 2)?;
 
-
+    // Initialize with PSM selector = OFF so key update doesn't require PSM signature
+    // This is the expected flow: disable PSM, update key, then enable PSM in a follow-up tx
     let multisig_account =
         create_multisig_account_with_psm(2, &public_keys, psm_public_key.clone(), true)?;
 
