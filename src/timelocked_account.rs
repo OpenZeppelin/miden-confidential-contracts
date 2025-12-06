@@ -12,7 +12,7 @@ use miden_objects::{
 
 use miden_objects::account::auth::PublicKeyCommitment;
 
-use crate::masm_builder::{build_psm_component, build_timelocked_account_component};
+use crate::{masm_builder::{build_psm_component, build_timelocked_account_component}, procedure_digest::{psm, timelocked}};
 
 /// Configuration for creating a TimelockedAccount account.
 #[derive(Debug, Clone)]
@@ -132,12 +132,11 @@ impl TimelockedAccountBuilder {
     /// - execute_key_rotation: 2 signatures
     /// - update_psm_public_key: 2 signatures + 1 PSM signature
     pub fn default_proc_threshold_overrides() -> Vec<(Word, u32)> {
-        /*vec![
+        vec![
             (timelocked::propose_key_rotation_digest(), 1),
             (timelocked::execute_key_rotation_digest(), 1),
             (psm::update_psm_public_key_digest(), 2),
-        ]*/
-        vec![]
+        ]
     }
 
     /// Sets the seed used for account ID derivation.
