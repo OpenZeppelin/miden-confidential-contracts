@@ -61,6 +61,8 @@ const ERR_MALFORMED_MULTISIG_CONFIG = "number of approvers must be equal to or g
 
 const ERR_ZERO_IN_MULTISIG_CONFIG = "number of approvers or threshold must not be zero"
 
+const ERR_THRESHOLD_NOT_1 = "threshold must be 1 for the timelocked account"
+
 # MULTISIG PROCEDURES
 # =================================================================================================
 
@@ -272,7 +274,7 @@ proc update_signers_and_threshold.2(multisig_config_hash: BeWord)
 
     # make sure that threshold or num_approvers are not zero
     eq.0 assertz.err=ERR_ZERO_IN_MULTISIG_CONFIG
-    eq.0 assertz.err=ERR_ZERO_IN_MULTISIG_CONFIG
+    neq.1 assertz.err=ERR_THRESHOLD_NOT_1
     # => [MULTISIG_CONFIG, pad(12)]
 
     push.THRESHOLD_CONFIG_SLOT
