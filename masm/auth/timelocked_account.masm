@@ -63,6 +63,13 @@ const ERR_ZERO_IN_MULTISIG_CONFIG = "number of approvers or threshold must not b
 
 const ERR_THRESHOLD_NOT_1 = "threshold must be 1 for the timelocked account"
 
+const ERR_KEY_ROTATION_STILL_TIMELOCKED="key rotation still timelocked"
+
+const ERR_KEY_ROTATION_ALREADY_PENDING="key rotation already pending for this config"
+
+const ERR_NO_PENDING_ROTATION="no pending key rotation for this config"
+
+
 # MULTISIG PROCEDURES
 # =================================================================================================
 
@@ -145,92 +152,110 @@ proc cleanup_pubkey_mapping(init_num_of_approvers: u32, new_num_of_approvers: u3
 end
 
 # Inputs:  [MULTISIG_CONFIG_HASH, pad(12)]
-# Outputs: []
-
+# Outputs: [pad(12)]
 pub proc propose_key_rotation.2(multisig_config_hash: BeWord)
-    # 0. Eğer aynı config hash için zaten pending proposal varsa fail et
-    padw dup                      # => [MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+    dupw
+    # => [MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
+    # --- Check if there is a pending proposal ---
     push.KEY_ROTATION_PROPOSALS_SLOT
+    # => [KEY_ROTATION_PROPOSALS_SLOT, MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
     exec.active_account::get_initial_map_item
-    # => [[0,0,0, proposed_at], MULTISIG_CONFIG_HASH, pad(12)]
+    # => [[0, 0, 0, proposed_at], MULTISIG_CONFIG_HASH, pad(12)]
 
-    drop drop drop                # proposed_at
-    dup eq.0
-    # proposed_at == 0 ise sorun yok, devam; değilse "zaten pending" hatası
-    assertz.err="key rotation already pending for this config"
-    # => []
+    drop drop drop
+    # => [proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 1. current_block al (buraya Miden’in gerçek primitive’ini koyman gerekecek)
-    # Örnek pseudo:
+    # If proposed_at == 0, no_entry.
+    # If proposed_at != 0, pending -> revert
+    eq.0
+    assert.err=ERR_KEY_ROTATION_ALREADY_PENDING
+    # => [MULTISIG_CONFIG_HASH, pad(12)]
+
     exec.tx::get_block_number
     # => [current_block, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 2. map value: [current_block, 0, 0, 0] oluştur
-    # (detaylı stack juggling’i burada atlıyorum; mantık şu:
-    #    value_word = [current_block, 0, 0, 0])
-    # ve sonra:
-    #    key = MULTISIG_CONFIG_HASH
+    push.0.0.0
+    # => [[0, 0, 0, current_block], MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 3. KEY_ROTATION_PROPOSALS_SLOT’a yaz
+    swapw
+    # => [MULTISIG_CONFIG_HASH, [0, 0, 0, current_block], pad(12)]
+
     push.KEY_ROTATION_PROPOSALS_SLOT
-    # => [slot, key, value_word]
-    exec.native_account::set_map_item
-    dropw dropw
+    # => [KEY_ROTATION_PROPOSALS_SLOT, MULTISIG_CONFIG_HASH, [0, 0, 0, current_block], pad(12)]
 
-    # 4. storage’a sadece proposal yazıyoruz, herhangi bir signer update’i yok.
+    exec.native_account::set_map_item
+    # => [OLD_MAP_ROOT, OLD_VALUE, pad(12)]
+
+    dropw dropw
+    # [pad(16)]
 end
 
+
 pub proc execute_key_rotation.2(multisig_config_hash: BeWord)
-    # 1. Proposal’ı oku
-    padw dup                                 # [MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+    dupw
+    # => [MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
     push.KEY_ROTATION_PROPOSALS_SLOT
+    # => [KEY_ROTATION_PROPOSALS_SLOT, MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
     exec.active_account::get_initial_map_item
     # => [[0,0,0, proposed_at], MULTISIG_CONFIG_HASH, pad(12)]
 
-    # value içindeki proposed_at’i al
-    drop drop drop                           # => [proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
-
-    # proposal yoksa fail
-    dup eq.0
-    assertz.err="no pending key rotation for this config"
+    drop drop drop
     # => [proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 2. delay config’i yükle
+    dup eq.0
+    assertz.err=ERR_NO_PENDING_ROTATION
+    # => [proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
+
     push.KEY_ROTATION_CONFIG_SLOT
+    # => [KEY_ROTATION_CONFIG_SLOT, proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
+
     exec.active_account::get_initial_item
     # => [0,0,0, delay_blocks, proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
 
-    drop drop drop                           # => [delay_blocks, proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
+    drop drop drop 
+    # => [delay_blocks, proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 3. current_block al
     exec.tx::get_block_number
     # => [current_block, delay_blocks, proposed_at, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 4. current_block >= proposed_at + delay_blocks kontrolü
-    # (u32 hesaplayan kısmı pseudo bırakıyorum)
-    # check: current_block >= proposed_at + delay_blocks
-    # aksi halde assert.err="key rotation still timelocked"
+    movdn.2
+    # => [delay_blocks, proposed_at, current_block, MULTISIG_CONFIG_HASH, pad(12)]
+    
+    add
+    # => [delay_blocks + proposed_at, current_block, MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 5. Proposal entry’yi temizle
+    # --- Check if current_block => delay_blocks + proposed_at
+    gte
+    assert.err=ERR_KEY_ROTATION_STILL_TIMELOCKED
+
+    # --- Cleanup proposal entry
     # map[MULTISIG_CONFIG_HASH] = [0,0,0,0]
-    push.0.0.0.0                              # value = ZERO
-    movup.5                                   # key = MULTISIG_CONFIG_HASH
+    dupw
+    # => [MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
+    push.0.0.0.0
+    # => [ZERO, MULTISIG_CONFIG_HASH, MULTISIG_CONFIG_HASH, pad(12)]
+
+    swapw
+    # => [MULTISIG_CONFIG_HASH, ZERO, MULTISIG_CONFIG_HASH, pad(12)]
+
     push.KEY_ROTATION_PROPOSALS_SLOT
+    # => [KEY_ROTATION_PROPOSALS_SLOT, MULTISIG_CONFIG_HASH, ZERO, MULTISIG_CONFIG_HASH, pad(12)]
+
     exec.native_account::set_map_item
+    # => [OLD_MAP_ROOT, OLD_VALUE, MULTISIG_CONFIG_HASH, pad(12)]
+    
     dropw dropw
+    # => [MULTISIG_CONFIG_HASH, pad(12)]
 
-    # 6. Asıl key rotation’ı uygula
-    #
-    # Burada stack’te MULTISIG_CONFIG_HASH’i tekrar istediğin formatta bırakıp
-    # doğrudan mevcut `update_signers_and_threshold.2`’yi çağırabilirsin.
-    #
-    # Örnek:
-    #   [MULTISIG_CONFIG_HASH, pad(12)]
-    # olacak şekilde stack’i ayarlayıp:
-    #
+    # --- Execute key rotation
     exec.update_signers_and_threshold
+    # => [pad(16)]
 end
-
 
 #! Update threshold config and add / remove approvers
 #!
@@ -250,6 +275,11 @@ end
 #! Locals:
 #! 0: new_num_of_approvers
 #! 1: init_num_of_approvers
+#!
+#! Notes:
+#! For the single user (multisig: primary key & secondary key) timelocked account
+#! Default Threshold must be equalt to zero
+#! This procedure will be fixed to update_signers procedure to get rid of threshold changes
 proc update_signers_and_threshold.2(multisig_config_hash: BeWord)
     adv.push_mapval
     # => [MULTISIG_CONFIG_HASH, pad(12)]
