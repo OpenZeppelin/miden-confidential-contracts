@@ -161,7 +161,6 @@ pub proc verify_psm_signature(msg: BeWord)
     exec.active_account::get_item
     drop drop drop
     # => [selector, MSG]
-    debug.stack
 
     push.1 eq
     if.true
